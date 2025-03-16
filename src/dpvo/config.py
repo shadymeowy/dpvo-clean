@@ -6,7 +6,7 @@ _C = CN()
 _C.BUFFER_SIZE = 4096
 
 # bias patch selection towards high gradient regions?
-_C.CENTROID_SEL_STRAT = 'RANDOM'
+_C.CENTROID_SEL_STRAT = "RANDOM"
 
 # VO config (increase for better accuracy)
 _C.PATCHES_PER_FRAME = 80
@@ -19,7 +19,7 @@ _C.KEYFRAME_INDEX = 4
 _C.KEYFRAME_THRESH = 12.5
 
 # camera motion model
-_C.MOTION_MODEL = 'DAMPED_LINEAR'
+_C.MOTION_MODEL = "DAMPED_LINEAR"
 _C.MOTION_DAMPING = 0.5
 
 _C.MIXED_PRECISION = True

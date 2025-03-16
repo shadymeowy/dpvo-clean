@@ -1,13 +1,8 @@
 import torch
 from torch_scatter import scatter_sum
 
-from . import fastba
-from . import lietorch
-from .lietorch import SE3
-
-from .utils import Timer
-
 from . import projective_ops as pops
+
 
 class CholeskySolver(torch.autograd.Function):
     @staticmethod
@@ -32,45 +27,51 @@ class CholeskySolver(torch.autograd.Function):
 
         U, xs = ctx.saved_tensors
         dz = torch.cholesky_solve(grad_x, U)
-        dH = -torch.matmul(xs, dz.transpose(-1,-2))
+        dH = -torch.matmul(xs, dz.transpose(-1, -2))
 
         return dH, dz
+
 
 # utility functions for scattering ops
 def safe_scatter_add_mat(A, ii, jj, n, m):
     v = (ii >= 0) & (jj >= 0) & (ii < n) & (jj < m)
-    return scatter_sum(A[:,v], ii[v]*m + jj[v], dim=1, dim_size=n*m)
+    return scatter_sum(A[:, v], ii[v] * m + jj[v], dim=1, dim_size=n * m)
+
 
 def safe_scatter_add_vec(b, ii, n):
     v = (ii >= 0) & (ii < n)
-    return scatter_sum(b[:,v], ii[v], dim=1, dim_size=n)
+    return scatter_sum(b[:, v], ii[v], dim=1, dim_size=n)
+
 
 # apply retraction operator to inv-depth maps
 def disp_retr(disps, dz, ii):
     ii = ii.to(device=dz.device)
     return disps + scatter_sum(dz, ii, dim=1, dim_size=disps.shape[1])
 
+
 # apply retraction operator to poses
 def pose_retr(poses, dx, ii):
     ii = ii.to(device=dx.device)
     return poses.retr(scatter_sum(dx, ii, dim=1, dim_size=poses.shape[1]))
 
+
 def block_matmul(A, B):
-    """ block matrix multiply """
+    """block matrix multiply"""
     b, n1, m1, p1, q1 = A.shape
     b, n2, m2, p2, q2 = B.shape
-    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1*p1, m1*q1)
-    B = B.permute(0, 1, 3, 2, 4).reshape(b, n2*p2, m2*q2)
+    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1 * p1, m1 * q1)
+    B = B.permute(0, 1, 3, 2, 4).reshape(b, n2 * p2, m2 * q2)
     return torch.matmul(A, B).reshape(b, n1, p1, m2, q2).permute(0, 1, 3, 2, 4)
 
+
 def block_solve(A, B, ep=1.0, lm=1e-4):
-    """ block matrix solve """
+    """block matrix solve"""
     b, n1, m1, p1, q1 = A.shape
     b, n2, m2, p2, q2 = B.shape
-    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1*p1, m1*q1)
-    B = B.permute(0, 1, 3, 2, 4).reshape(b, n2*p2, m2*q2)
+    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1 * p1, m1 * q1)
+    B = B.permute(0, 1, 3, 2, 4).reshape(b, n2 * p2, m2 * q2)
 
-    A = A + (ep + lm * A) * torch.eye(n1*p1, device=A.device)
+    A = A + (ep + lm * A) * torch.eye(n1 * p1, device=A.device)
 
     X = CholeskySolver.apply(A, B)
     return X.reshape(b, n1, p1, m2, q2).permute(0, 1, 3, 2, 4)
@@ -78,42 +79,61 @@ def block_solve(A, B, ep=1.0, lm=1e-4):
 
 def block_show(A):
     import matplotlib.pyplot as plt
+
     b, n1, m1, p1, q1 = A.shape
-    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1*p1, m1*q1)
+    A = A.permute(0, 1, 3, 2, 4).reshape(b, n1 * p1, m1 * q1)
     plt.imshow(A[0].detach().cpu().numpy())
     plt.show()
 
-def BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, ep=100.0, PRINT=False, fixedp=1, structure_only=False):
-    """ bundle adjustment """
+
+def BA(
+    poses,
+    patches,
+    intrinsics,
+    targets,
+    weights,
+    lmbda,
+    ii,
+    jj,
+    kk,
+    bounds,
+    ep=100.0,
+    PRINT=False,
+    fixedp=1,
+    structure_only=False,
+):
+    """bundle adjustment"""
 
     b = 1
     n = max(ii.max().item(), jj.max().item()) + 1
 
-    coords, v, (Ji, Jj, Jz) = \
-        pops.transform(poses, patches, intrinsics, ii, jj, kk, jacobian=True)
+    coords, v, (Ji, Jj, Jz) = pops.transform(
+        poses, patches, intrinsics, ii, jj, kk, jacobian=True
+    )
 
     p = coords.shape[3]
-    r = targets - coords[...,p//2,p//2,:]
+    r = targets - coords[..., p // 2, p // 2, :]
 
     v *= (r.norm(dim=-1) < 250).float()
 
-    in_bounds = \
-        (coords[...,p//2,p//2,0] > bounds[0]) & \
-        (coords[...,p//2,p//2,1] > bounds[1]) & \
-        (coords[...,p//2,p//2,0] < bounds[2]) & \
-        (coords[...,p//2,p//2,1] < bounds[3])
+    in_bounds = (
+        (coords[..., p // 2, p // 2, 0] > bounds[0])
+        & (coords[..., p // 2, p // 2, 1] > bounds[1])
+        & (coords[..., p // 2, p // 2, 0] < bounds[2])
+        & (coords[..., p // 2, p // 2, 1] < bounds[3])
+    )
 
     v *= in_bounds.float()
 
     if PRINT:
-        print((r * v[...,None]).norm(dim=-1).mean().item())
+        print((r * v[..., None]).norm(dim=-1).mean().item())
 
-    r = (v[...,None] * r).unsqueeze(dim=-1)    
-    weights = (v[...,None] * weights).unsqueeze(dim=-1)
+    r = (v[..., None] * r).unsqueeze(dim=-1)
+    weights = (v[..., None] * weights).unsqueeze(dim=-1)
 
-    wJiT = (weights * Ji).transpose(2,3)
-    wJjT = (weights * Jj).transpose(2,3)
-    wJzT = (weights * Jz).transpose(2,3)
+    wJiT = (weights * Ji).transpose(2, 3)
+    wJjT = (weights * Jj).transpose(2, 3)
+    wJzT = (weights * Jz).transpose(2, 3)
 
     Bii = torch.matmul(wJiT, Ji)
     Bij = torch.matmul(wJiT, Jj)
@@ -137,38 +157,42 @@ def BA(poses, patches, intrinsics, targets, weights, lmbda, ii, jj, kk, bounds, 
     kx, kk = torch.unique(kk, return_inverse=True, sorted=True)
     m = len(kx)
 
-    B = safe_scatter_add_mat(Bii, ii, ii, n, n).view(b, n, n, 6, 6) + \
-        safe_scatter_add_mat(Bij, ii, jj, n, n).view(b, n, n, 6, 6) + \
-        safe_scatter_add_mat(Bji, jj, ii, n, n).view(b, n, n, 6, 6) + \
-        safe_scatter_add_mat(Bjj, jj, jj, n, n).view(b, n, n, 6, 6)
+    B = (
+        safe_scatter_add_mat(Bii, ii, ii, n, n).view(b, n, n, 6, 6)
+        + safe_scatter_add_mat(Bij, ii, jj, n, n).view(b, n, n, 6, 6)
+        + safe_scatter_add_mat(Bji, jj, ii, n, n).view(b, n, n, 6, 6)
+        + safe_scatter_add_mat(Bjj, jj, jj, n, n).view(b, n, n, 6, 6)
+    )
 
-    E = safe_scatter_add_mat(Eik, ii, kk, n, m).view(b, n, m, 6, 1) + \
-        safe_scatter_add_mat(Ejk, jj, kk, n, m).view(b, n, m, 6, 1) 
+    E = safe_scatter_add_mat(Eik, ii, kk, n, m).view(
+        b, n, m, 6, 1
+    ) + safe_scatter_add_mat(Ejk, jj, kk, n, m).view(b, n, m, 6, 1)
 
     C = safe_scatter_add_vec(torch.matmul(wJzT, Jz), kk, m)
 
-    v = safe_scatter_add_vec(vi, ii, n).view(b, n, 1, 6, 1) + \
-        safe_scatter_add_vec(vj, jj, n).view(b, n, 1, 6, 1)
+    v = safe_scatter_add_vec(vi, ii, n).view(b, n, 1, 6, 1) + safe_scatter_add_vec(
+        vj, jj, n
+    ).view(b, n, 1, 6, 1)
 
-    w = safe_scatter_add_vec(torch.matmul(wJzT,  r), kk, m)
+    w = safe_scatter_add_vec(torch.matmul(wJzT, r), kk, m)
 
     if isinstance(lmbda, torch.Tensor):
         lmbda = lmbda.reshape(*C.shape)
-        
+
     Q = 1.0 / (C + lmbda)
-    
+
     ### solve w/ schur complement ###
-    EQ = E * Q[:,None]
+    EQ = E * Q[:, None]
 
     if structure_only or n == 0:
         dZ = (Q * w).view(b, -1, 1, 1)
 
     else:
-        S = B - block_matmul(EQ, E.permute(0,2,1,4,3))
+        S = B - block_matmul(EQ, E.permute(0, 2, 1, 4, 3))
         y = v - block_matmul(EQ, w.unsqueeze(dim=2))
         dX = block_solve(S, y, ep=ep, lm=1e-4)
 
-        dZ = Q * (w - block_matmul(E.permute(0,2,1,4,3), dX).squeeze(dim=-1))
+        dZ = Q * (w - block_matmul(E.permute(0, 2, 1, 4, 3), dX).squeeze(dim=-1))
         dX = dX.view(b, -1, 6)
         dZ = dZ.view(b, -1, 1, 1)
 

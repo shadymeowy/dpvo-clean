@@ -1,24 +1,27 @@
 import os
+from itertools import chain
+from pathlib import Path
+
 import cv2
 import numpy as np
-from multiprocessing import Process, Queue
-from pathlib import Path
-from itertools import chain
+
 
 def image_stream(queue, imagedir, calib, stride, skip=0):
-    """ image generator """
+    """image generator"""
 
     calib = np.loadtxt(calib, delimiter=" ")
     fx, fy, cx, cy = calib[:4]
 
     K = np.eye(3)
-    K[0,0] = fx
-    K[0,2] = cx
-    K[1,1] = fy
-    K[1,2] = cy
+    K[0, 0] = fx
+    K[0, 2] = cx
+    K[1, 1] = fy
+    K[1, 2] = cy
 
     img_exts = ["*.png", "*.jpeg", "*.jpg"]
-    image_list = sorted(chain.from_iterable(Path(imagedir).glob(e) for e in img_exts))[skip::stride]
+    image_list = sorted(chain.from_iterable(Path(imagedir).glob(e) for e in img_exts))[
+        skip::stride
+    ]
     assert os.path.exists(imagedir), imagedir
 
     for t, imfile in enumerate(image_list):
@@ -32,9 +35,9 @@ def image_stream(queue, imagedir, calib, stride, skip=0):
 
         else:
             intrinsics = np.array([fx, fy, cx, cy])
-            
+
         h, w, _ = image.shape
-        image = image[:h-h%16, :w-w%16]
+        image = image[: h - h % 16, : w - w % 16]
 
         queue.put((t, image, intrinsics))
 
@@ -42,16 +45,16 @@ def image_stream(queue, imagedir, calib, stride, skip=0):
 
 
 def video_stream(queue, imagedir, calib, stride, skip=0):
-    """ video generator """
+    """video generator"""
 
     calib = np.loadtxt(calib, delimiter=" ")
     fx, fy, cx, cy = calib[:4]
 
     K = np.eye(3)
-    K[0,0] = fx
-    K[0,2] = cx
-    K[1,1] = fy
-    K[1,2] = cy
+    K[0, 0] = fx
+    K[0, 2] = cx
+    K[1, 1] = fy
+    K[1, 2] = cy
 
     assert os.path.exists(imagedir), imagedir
     cap = cv2.VideoCapture(imagedir)
@@ -77,13 +80,12 @@ def video_stream(queue, imagedir, calib, stride, skip=0):
 
         image = cv2.resize(image, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_AREA)
         h, w, _ = image.shape
-        image = image[:h-h%16, :w-w%16]
+        image = image[: h - h % 16, : w - w % 16]
 
-        intrinsics = np.array([fx*.5, fy*.5, cx*.5, cy*.5])
+        intrinsics = np.array([fx * 0.5, fy * 0.5, cx * 0.5, cy * 0.5])
         queue.put((t, image, intrinsics))
 
         t += 1
 
     queue.put((-1, image, intrinsics))
     cap.release()
-

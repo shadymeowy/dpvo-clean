@@ -6,7 +6,6 @@ import numpy as np
 import pypose as pp
 import torch
 import torch.multiprocessing as mp
-import torch.nn.functional as F
 from einops import asnumpy, rearrange, repeat
 from torch_scatter import scatter_max
 
@@ -18,7 +17,6 @@ from .retrieval import ImageCache, RetrievalDBOW
 
 
 class LongTermLoopClosure:
-
     def __init__(self, cfg, patchgraph):
         self.cfg = cfg
 
@@ -41,22 +39,32 @@ class LongTermLoopClosure:
         self.lc_count = 0
 
         # warmup the jit compiler
-        ransac_umeyama(np.random.randn(3,3), np.random.randn(3,3), iterations=200, threshold=0.01)
+        ransac_umeyama(
+            np.random.randn(3, 3), np.random.randn(3, 3), iterations=200, threshold=0.01
+        )
 
         self.detector = KF.DISK.from_pretrained("depth").to("cuda").eval()
         self.matcher = KF.LightGlue("disk").to("cuda").eval()
 
     def detect_keypoints(self, images, num_features=2048):
-        """ Pretty self explanitory! Alas, we can only use disk w/ lightglue. ORB is brittle """
+        """Pretty self explanitory! Alas, we can only use disk w/ lightglue. ORB is brittle"""
         _, _, h, w = images.shape
         wh = torch.tensor([w, h]).view(1, 2).float().cuda()
-        features = self.detector(images, num_features, pad_if_not_divisible=True, window_size=15, score_threshold=40.0)
-        return [{
-            "keypoints": f.keypoints[None],
-            "descriptors": f.descriptors[None],
-            "image_size": wh
-        } for f in features]
-
+        features = self.detector(
+            images,
+            num_features,
+            pad_if_not_divisible=True,
+            window_size=15,
+            score_threshold=40.0,
+        )
+        return [
+            {
+                "keypoints": f.keypoints[None],
+                "descriptors": f.descriptors[None],
+                "image_size": wh,
+            }
+            for f in features
+        ]
 
     def __call__(self, img, n):
         img_np = K.tensor_to_image(img)
@@ -68,16 +76,18 @@ class LongTermLoopClosure:
         self.imcache.keyframe(k)
 
     def estimate_3d_keypoints(self, i):
-        """ Detect, match and triangulate 3D points """
+        """Detect, match and triangulate 3D points"""
 
         """ Load the triplet of frames """
-        image_orig = self.imcache.load_frames([i-1,i,i+1], self.pg.intrinsics.device)
+        image_orig = self.imcache.load_frames(
+            [i - 1, i, i + 1], self.pg.intrinsics.device
+        )
         image = image_orig.float() / 255
         fl = self.detect_keypoints(image)
 
         """ Form keypoint trajectories """
-        trajectories = torch.full((2048, 3), -1, device='cuda', dtype=torch.long)
-        trajectories[:,1] = torch.arange(2048)
+        trajectories = torch.full((2048, 3), -1, device="cuda", dtype=torch.long)
+        trajectories[:, 1] = torch.arange(2048)
 
         out = self.matcher({"image0": fl[0], "image1": fl[1]})
         i0, i1 = out["matches"][0].mT
@@ -90,59 +100,82 @@ class LongTermLoopClosure:
         trajectories = trajectories[torch.randperm(2048)]
         trajectories = trajectories[trajectories.min(dim=1).values >= 0]
 
-        a,b,c = trajectories.mT
+        a, b, c = trajectories.mT
         n, _ = trajectories.shape
-        kps0 = fl[0]['keypoints'][:,a]
-        kps1 = fl[1]['keypoints'][:,b]
-        kps2 = fl[2]['keypoints'][:,c]
+        kps0 = fl[0]["keypoints"][:, a]
+        kps1 = fl[1]["keypoints"][:, b]
+        kps2 = fl[2]["keypoints"][:, c]
 
-        desc1 = fl[1]['descriptors'][:,b]
+        desc1 = fl[1]["descriptors"][:, b]
         image_size = fl[1]["image_size"]
 
         kk = torch.arange(n).cuda().repeat(2)
-        ii = torch.ones(2*n, device='cuda', dtype=torch.long)
-        jj = torch.zeros(2*n, device='cuda', dtype=torch.long)
+        ii = torch.ones(2 * n, device="cuda", dtype=torch.long)
+        jj = torch.zeros(2 * n, device="cuda", dtype=torch.long)
         jj[n:] = 2
 
-
         """ Construct "mini" patch graph. """
-        true_disp = self.pg.patches_[i,:,2,1,1].median()
+        true_disp = self.pg.patches_[i, :, 2, 1, 1].median()
         patches = torch.cat((kps1, torch.ones(1, n, 1).cuda() * true_disp), dim=-1)
-        patches = repeat(patches, '1 n uvd -> 1 n uvd 3 3', uvd=3)
-        target = rearrange(torch.stack((kps0, kps2)), 'ot 1 n uv -> 1 (ot n) uv', uv=2, n=n, ot=2)
+        patches = repeat(patches, "1 n uvd -> 1 n uvd 3 3", uvd=3)
+        target = rearrange(
+            torch.stack((kps0, kps2)), "ot 1 n uv -> 1 (ot n) uv", uv=2, n=n, ot=2
+        )
         weight = torch.ones_like(target)
 
-        poses = self.pg.poses[:,i-1:i+2].clone()
-        intrinsics = self.pg.intrinsics[:,i-1:i+2].clone() * 4
+        poses = self.pg.poses[:, i - 1 : i + 2].clone()
+        intrinsics = self.pg.intrinsics[:, i - 1 : i + 2].clone() * 4
 
         coords = pops.transform(SE3(poses), patches, intrinsics, ii, jj, kk)
-        coords = coords[:,:,1,1]
+        coords = coords[:, :, 1, 1]
         residual = (coords - target).norm(dim=-1).squeeze(0)
 
         """ structure-only bundle adjustment """
         lmbda = torch.as_tensor([1e-3], device="cuda")
-        fastba.BA(poses, patches, intrinsics,
-            target, weight, lmbda, ii, jj, kk, 3, 3, M=-1, iterations=6, eff_impl=False)
+        fastba.BA(
+            poses,
+            patches,
+            intrinsics,
+            target,
+            weight,
+            lmbda,
+            ii,
+            jj,
+            kk,
+            3,
+            3,
+            M=-1,
+            iterations=6,
+            eff_impl=False,
+        )
 
         """ Only keep points with small residuals """
         coords = pops.transform(SE3(poses), patches, intrinsics, ii, jj, kk)
-        coords = coords[:,:,1,1]
+        coords = coords[:, :, 1, 1]
         residual = (coords - target).norm(dim=-1).squeeze(0)
-        assert residual.numel() == 2*n
+        assert residual.numel() == 2 * n
         mask = scatter_max(residual, kk)[0] < 2
 
         """ Un-project keypoints """
-        points = pops.iproj(patches, intrinsics[:,torch.ones(n, device='cuda', dtype=torch.long)])
-        points = (points[...,1,1,:3] / points[...,1,1,3:])
+        points = pops.iproj(
+            patches, intrinsics[:, torch.ones(n, device="cuda", dtype=torch.long)]
+        )
+        points = points[..., 1, 1, :3] / points[..., 1, 1, 3:]
 
-        return points[:,mask].squeeze(0), {"keypoints": kps1[:,mask], "descriptors": desc1[:,mask], "image_size": image_size}
+        return points[:, mask].squeeze(0), {
+            "keypoints": kps1[:, mask],
+            "descriptors": desc1[:, mask],
+            "image_size": image_size,
+        }
 
     def attempt_loop_closure(self, n):
         if self.lc_in_progress:
             return
 
         """ Check if a loop was detected """
-        cands = self.retrieval.detect_loop(thresh=self.cfg.LOOP_RETR_THRESH, num_repeat=self.cfg.LOOP_CLOSE_WINDOW_SIZE)
+        cands = self.retrieval.detect_loop(
+            thresh=self.cfg.LOOP_RETR_THRESH, num_repeat=self.cfg.LOOP_CLOSE_WINDOW_SIZE
+        )
         if cands is not None:
             i, j = cands
 
@@ -160,8 +193,8 @@ class LongTermLoopClosure:
         self.imcache.save_up_to(n - self.cfg.REMOVAL_WINDOW - 1)
 
     def terminate(self, n):
-        self.retrieval.save_up_to(n-1)
-        self.imcache.save_up_to(n-1)
+        self.retrieval.save_up_to(n - 1)
+        self.imcache.save_up_to(n - 1)
         self.attempt_loop_closure(n)
         if self.lc_in_progress:
             self.lc_callback(skip_if_empty=False)
@@ -171,9 +204,8 @@ class LongTermLoopClosure:
         self.retrieval.close()
         print(f"LC COUNT: {self.lc_count}")
 
-
     def _rescale_deltas(self, s):
-        """ Rescale the poses of removed frames by their predicted scales """
+        """Rescale the poses of removed frames by their predicted scales"""
 
         tstamp_2_rescale = {}
         for i in range(self.pg.n):
@@ -187,24 +219,24 @@ class LongTermLoopClosure:
             self.pg.delta[t] = (t0, dP.scale(s1))
 
     def lc_callback(self, skip_if_empty=True):
-        """ Check if the PGO finished running """
+        """Check if the PGO finished running"""
         if skip_if_empty and self.result_queue.empty():
             return
         self.lc_in_progress = False
         final_est = self.result_queue.get()
         safe_i, _ = final_est.shape
-        res, s = final_est.tensor().cuda().split([7,1], dim=1)
+        res, s = final_est.tensor().cuda().split([7, 1], dim=1)
         s1 = torch.ones(self.pg.n, device=s.device)
         s1[:safe_i] = s.squeeze()
 
         self.pg.poses_[:safe_i] = SE3(res).inv().data
-        self.pg.patches_[:safe_i,:,2] /= s.view(safe_i, 1, 1, 1)
+        self.pg.patches_[:safe_i, :, 2] /= s.view(safe_i, 1, 1, 1)
         self._rescale_deltas(s1)
         self.pg.normalize()
 
     def close_loop(self, i, j, n):
-        """ This function tries to actually execute the loop closure """
-        MIN_NUM_INLIERS = 30 # Minimum number of inlier matches
+        """This function tries to actually execute the loop closure"""
+        MIN_NUM_INLIERS = 30  # Minimum number of inlier matches
         # print("Found a match!", i, j)
 
         """ Estimate 3d keypoints w/ features"""
@@ -212,12 +244,12 @@ class LongTermLoopClosure:
         j_pts, j_feat = self.estimate_3d_keypoints(j)
         _, _, iz = i_pts.mT
         _, _, jz = j_pts.mT
-        th = 20 # a depth threshold. Far-away points aren't helpful
+        th = 20  # a depth threshold. Far-away points aren't helpful
         i_pts = i_pts[iz < th]
         j_pts = j_pts[jz < th]
-        for key in ['keypoints', 'descriptors']:
-            i_feat[key] = i_feat[key][:,iz < th]
-            j_feat[key] = j_feat[key][:,jz < th]
+        for key in ["keypoints", "descriptors"]:
+            i_feat[key] = i_feat[key][:, iz < th]
+            j_feat[key] = j_feat[key][:, jz < th]
 
         # Early exit
         if i_pts.numel() < MIN_NUM_INLIERS:
@@ -238,7 +270,9 @@ class LongTermLoopClosure:
             return False
 
         """ Estimate Sim(3) transformation """
-        r, t, s, num_inliers = ransac_umeyama(i_pts, j_pts, iterations=400, threshold=0.1) # threshold shouldn't be too low
+        r, t, s, num_inliers = ransac_umeyama(
+            i_pts, j_pts, iterations=400, threshold=0.1
+        )  # threshold shouldn't be too low
 
         # Exist if number of inlier matches is too small
         if num_inliers < MIN_NUM_INLIERS:
@@ -247,8 +281,8 @@ class LongTermLoopClosure:
 
         """ Run Pose-Graph Optimization (PGO) """
         far_rel_pose = make_pypose_Sim3(r, t, s)[None]
-        Gi = pp.SE3(self.pg.poses[:,self.loop_ii])
-        Gj = pp.SE3(self.pg.poses[:,self.loop_jj])
+        Gi = pp.SE3(self.pg.poses[:, self.loop_ii])
+        Gj = pp.SE3(self.pg.poses[:, self.loop_jj])
         Gij = Gj * Gi.Inv()
         prev_sim3 = SE3_to_Sim3(Gij).data[0].cpu()
         loop_poses = pp.Sim3(torch.cat((prev_sim3, far_rel_pose)))
@@ -263,5 +297,8 @@ class LongTermLoopClosure:
         torch.set_num_threads(1)
 
         self.lc_in_progress = True
-        self.lc_process = self.lc_pool.apply_async(run_DPVO_PGO, (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue))
+        self.lc_process = self.lc_pool.apply_async(
+            run_DPVO_PGO,
+            (pred_poses.data, loop_poses.data, loop_ii, loop_jj, self.result_queue),
+        )
         return True
