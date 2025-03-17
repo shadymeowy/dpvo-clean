@@ -1,3 +1,18 @@
+# dpvo-clean
+This version of DPVO is a cleaned up version of the original DPVO repository. The original repository can be found [here](https://github.com/princeton-vl/DPVO). The main changes are:
+- Eigen is now included as source code for easier installation
+- Pangolin viewer and the classical backend is removed
+- The code is cleaned up and the build system is changed to use setuptools and pip instead of Conda
+- Building binary wheels is now possible
+- No cmake is needed for the installation
+- Code formatted and cleaned up using help of `ruff`
+- **TODO** Development Dockerfile
+- **TODO** Update the README with the new installation instructions
+- **TODO** Fix deprecated Torch code for future compatibility
+- **TODO** Find a way to avoid unorthodox distribution of torch-scatter (--find-links, I am looking at you)
+
+The original README is below:
+
 # Deep Patch Visual Odometry/SLAM
 This repository contains the source code for our papers:
 
