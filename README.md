@@ -4,6 +4,7 @@ This version of DPVO is a cleaned up version of the original DPVO repository. Th
 - Pangolin viewer and the classical backend is removed
 - The code is cleaned up and the build system is changed to use setuptools and pip instead of Conda
 - Building binary wheels is now possible
+- Dockerfile for building wheels
 - No cmake is needed for the installation
 - Code formatted and cleaned up using help of `ruff`
 - Evaluation codes for M3ED and TUM-VI datasets
