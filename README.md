@@ -6,6 +6,7 @@ This version of DPVO is a cleaned up version of the original DPVO repository. Th
 - Building binary wheels is now possible
 - No cmake is needed for the installation
 - Code formatted and cleaned up using help of `ruff`
+- Evaluation codes for M3ED and TUM-VI datasets
 - **TODO** Development Dockerfile
 - **TODO** Update the README with the new installation instructions
 - **TODO** Fix deprecated Torch code for future compatibility
