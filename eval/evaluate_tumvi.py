@@ -38,6 +38,7 @@ parser.add_argument("--network", default="weights/dpvo.pth")
 parser.add_argument("--camera", default="cam0")
 parser.add_argument("--timeit", action="store_true")
 parser.add_argument("--target-intrinsics", nargs=4, type=float, default=None, metavar=("fx", "fy", "cx", "cz"))
+parser.add_argument("--show", action="store_true")
 
 parser.add_argument("--config", default="config/default.yaml")
 parser.add_argument("--plot", action="store_true")
@@ -115,14 +116,17 @@ with torch.no_grad():
         assert int(os.path.splitext(os.path.basename(path))[0]) == ipath
         image_path = os.path.join(image_dir, path)
         image = cv2.imread(image_path)
-        cv2.imshow("distorted", image)
+        if args.show:
+            cv2.imshow("distorted", image)
         image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
-        cv2.imshow("undistorted", image)
+        if args.show:
+            cv2.imshow("undistorted", image)
         image = torch.from_numpy(image).permute(2, 0, 1).cuda()
 
         with Timer("SLAM", enabled=args.timeit):
             slam(t, image, intrinsics_new)
-        cv2.waitKey(1)
+        if args.show:
+            cv2.waitKey(1)
 
     points = slam.pg.points_.cpu().numpy()[: slam.m]
     colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]

@@ -26,6 +26,7 @@ parser.add_argument("--camera", default="/ovc/rgb")
 parser.add_argument("--time", default="/ovc/ts")
 parser.add_argument("--timeit", action="store_true")
 parser.add_argument("--print-h5", action="store_true")
+parser.add_argument("--show", action="store_true")
 
 parser.add_argument("--config", default="config/default.yaml")
 parser.add_argument("--plot", action="store_true")
@@ -87,9 +88,11 @@ with h5py.File(args.data_h5) as f:
         slam = DPVO(cfg, args.network, ht=H, wd=W)
 
         for t, image in tqdm(islice(zip(ts, data), args.skip, None, args.stride), total=N):
-            cv2.imshow("distorted", image)
+            if args.show:
+                cv2.imshow("distorted", image)
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
-            cv2.imshow("undistorted", image)
+            if args.show:
+                cv2.imshow("undistorted", image)
             image = torch.from_numpy(image).permute(2, 0, 1).cuda()
 
             if slam is None:
@@ -97,7 +100,8 @@ with h5py.File(args.data_h5) as f:
 
             with Timer("SLAM", enabled=args.timeit):
                 slam(t, image, intrinsics_new)
-            cv2.waitKey(1)
+            if args.show:
+                cv2.waitKey(1)
 
         points = slam.pg.points_.cpu().numpy()[: slam.m]
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
