@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from scipy.spatial.transform import Rotation
 
-from ..lietorch import SE3
+from ..se3 import SE3
 from . import projective_ops as pops
 
 

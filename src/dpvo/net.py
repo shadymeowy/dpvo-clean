@@ -8,7 +8,7 @@ from . import projective_ops as pops
 from .ba import BA
 from .blocks import GatedResidual, GradientClip, SoftAgg
 from .extractor import BasicEncoder4
-from .lietorch import SE3
+from .se3 import ProxySE3 as SE3
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 
 autocast = torch.cuda.amp.autocast

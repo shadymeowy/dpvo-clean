@@ -7,7 +7,7 @@ from evaluate_tartan import evaluate as validate
 from torch.utils.data import DataLoader
 
 from dpvo.data_readers.factory import dataset_factory
-from dpvo.lietorch import SE3
+from dpvo.se3 import SE3
 from dpvo.logger import Logger
 from dpvo.net import VONet
 

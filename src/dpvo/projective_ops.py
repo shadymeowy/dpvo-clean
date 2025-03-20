@@ -1,6 +1,7 @@
 import torch
 
-from .lietorch import SE3, Sim3
+#from .lietorch import SE3, Sim3
+from .se3 import ProxySE3 as SE3
 
 MIN_DEPTH = 0.2
 
@@ -120,41 +121,42 @@ def transform(
                 ],
                 dim=-1,
             ).view(1, len(ii), 4, 6)
-
-        elif isinstance(Gij, Sim3):
-            Ja = torch.stack(
-                [
-                    H,
-                    o,
-                    o,
-                    o,
-                    Z,
-                    -Y,
-                    X,
-                    o,
-                    H,
-                    o,
-                    -Z,
-                    o,
-                    X,
-                    Y,
-                    o,
-                    o,
-                    H,
-                    Y,
-                    -X,
-                    o,
-                    Z,
-                    o,
-                    o,
-                    o,
-                    o,
-                    o,
-                    o,
-                    o,
-                ],
-                dim=-1,
-            ).view(1, len(ii), 4, 7)
+        else:
+            raise NotImplementedError
+        # elif isinstance(Gij, Sim3):
+        #     Ja = torch.stack(
+        #         [
+        #             H,
+        #             o,
+        #             o,
+        #             o,
+        #             Z,
+        #             -Y,
+        #             X,
+        #             o,
+        #             H,
+        #             o,
+        #             -Z,
+        #             o,
+        #             X,
+        #             Y,
+        #             o,
+        #             o,
+        #             H,
+        #             Y,
+        #             -X,
+        #             o,
+        #             Z,
+        #             o,
+        #             o,
+        #             o,
+        #             o,
+        #             o,
+        #             o,
+        #             o,
+        #         ],
+        #         dim=-1,
+        #     ).view(1, len(ii), 4, 7)
 
         Jp = torch.stack(
             [

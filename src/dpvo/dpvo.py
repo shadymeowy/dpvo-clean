@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from . import altcorr, fastba, lietorch
 from . import projective_ops as pops
-from .lietorch import SE3
+from .se3 import ProxySE3 as SE3
 from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import Timer, flatmeshgrid
@@ -209,6 +209,7 @@ class DPVO:
 
     def get_pose(self, t):
         if t in self.traj:
+            assert SE3(self.traj[t]) is not None
             return SE3(self.traj[t])
 
         t0, dP = self.pg.delta[t]

@@ -3,7 +3,7 @@ import torch
 from einops import asnumpy, reduce, repeat
 
 from . import projective_ops as pops
-from .lietorch import SE3
+from .se3 import ProxySE3 as SE3
 from .loop_closure.optim_utils import reduce_edges
 from .utils import flatmeshgrid
 
