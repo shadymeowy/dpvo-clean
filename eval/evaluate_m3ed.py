@@ -25,7 +25,7 @@ parser.add_argument("data_h5")
 parser.add_argument("--gt", default=None)
 parser.add_argument("--scene", default=None)
 parser.add_argument("--network", default="weights/dpvo.pth")
-parser.add_argument("--camera", default="/ovc/rgb")
+parser.add_argument("--camera", default="/ovc/left")
 parser.add_argument("--time", default="/ovc/ts")
 parser.add_argument("--timeit", action="store_true")
 parser.add_argument("--print-h5", action="store_true")
@@ -34,7 +34,7 @@ parser.add_argument("--name", default="")
 parser.add_argument("--scale", type=float, default=1.0)
 parser.add_argument("--end", type=int, default=None)
 parser.add_argument("--profile", type=str, default=None)
-
+parser.add_argument("--clahe", action="store_true")
 parser.add_argument("--config", default="config/default.yaml")
 parser.add_argument("--plot", action="store_true")
 parser.add_argument("--opts", nargs="+", default=[])
@@ -96,6 +96,9 @@ with h5py.File(args.data_h5) as f:
     if args.profile:
         profile = cProfile.Profile()
         profile.enable()
+    
+    if args.clahe:
+        clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(8, 8))
 
     with torch.no_grad():
         intrinsics_new = torch.from_numpy(intrinsics_new).cuda()
@@ -110,6 +113,15 @@ with h5py.File(args.data_h5) as f:
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
             if args.scale != 1.0:
                 image = cv2.resize(image, (0, 0), fx=args.scale, fy=args.scale)
+
+            if len(image.shape) == 2:
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+            if args.clahe:
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+                image = clahe.apply(image)
+                image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
             if args.show:
                 cv2.imshow("undistorted", image)
             image = torch.from_numpy(image).permute(2, 0, 1).cuda()
