@@ -1,5 +1,7 @@
 import argparse
+import cProfile
 import os
+import pstats
 from itertools import islice
 
 import cv2
@@ -7,15 +9,16 @@ import evo.main_ape as main_ape
 import h5py
 import numpy as np
 import torch
-from dpvo.config import cfg
-from dpvo.dpvo import DPVO
-from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
-from dpvo.utils import Timer
 from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
 from tqdm import tqdm
+
+from dpvo.config import cfg
+from dpvo.dpvo import DPVO
+from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
+from dpvo.utils import Timer
 
 parser = argparse.ArgumentParser()
 parser.add_argument("data_h5")
@@ -27,6 +30,10 @@ parser.add_argument("--time", default="/ovc/ts")
 parser.add_argument("--timeit", action="store_true")
 parser.add_argument("--print-h5", action="store_true")
 parser.add_argument("--show", action="store_true")
+parser.add_argument("--name", default="")
+parser.add_argument("--scale", type=float, default=1.0)
+parser.add_argument("--end", type=int, default=None)
+parser.add_argument("--profile", type=str, default=None)
 
 parser.add_argument("--config", default="config/default.yaml")
 parser.add_argument("--plot", action="store_true")
@@ -81,16 +88,28 @@ with h5py.File(args.data_h5) as f:
     data = f.get(f"{args.camera}/data")
     N = data.shape[0] // args.stride
     ts = f.get(f"{args.time}")[...] / 1e6
-    H, W, _ = data[0].shape
+    image = data[0]
+    if args.scale != 1.0:
+        image = cv2.resize(image, (0, 0), fx=args.scale, fy=args.scale)
+    H, W, _ = image.shape
+
+    if args.profile:
+        profile = cProfile.Profile()
+        profile.enable()
 
     with torch.no_grad():
         intrinsics_new = torch.from_numpy(intrinsics_new).cuda()
+        if args.scale != 1.0:
+            intrinsics_new[:] *= args.scale
         slam = DPVO(cfg, args.network, ht=H, wd=W)
-
-        for t, image in tqdm(islice(zip(ts, data), args.skip, None, args.stride), total=N):
+        for t, image in tqdm(
+            islice(zip(ts, data), args.skip, args.end, args.stride), total=N
+        ):
             if args.show:
                 cv2.imshow("distorted", image)
             image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+            if args.scale != 1.0:
+                image = cv2.resize(image, (0, 0), fx=args.scale, fy=args.scale)
             if args.show:
                 cv2.imshow("undistorted", image)
             image = torch.from_numpy(image).permute(2, 0, 1).cuda()
@@ -107,6 +126,14 @@ with h5py.File(args.data_h5) as f:
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
 
         poses, tstamps = slam.terminate()
+
+    if args.profile:
+        profile.disable()
+
+        with open(args.profile, "w") as f:
+            stats = pstats.Stats(profile, stream=f)
+            stats = stats.strip_dirs().sort_stats("cumtime")
+            stats.print_stats()
 
     traj_est = PoseTrajectory3D(
         positions_xyz=poses[:, :3],
@@ -141,7 +168,7 @@ with h5py.File(args.data_h5) as f:
                 traj_est,
                 traj_ref,
                 f"M3ED {scene} (ATE: {ate_score:.03f})",
-                f"trajectory_plots/M3ED_{scene}.pdf",
+                f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
                 align=True,
                 correct_scale=True,
             )
@@ -149,14 +176,14 @@ with h5py.File(args.data_h5) as f:
         if args.save_trajectory:
             os.makedirs("saved_trajectories", exist_ok=True)
             file_interface.write_tum_trajectory_file(
-                f"saved_trajectories/M3ED_{scene}.txt", traj_est
+                f"saved_trajectories/M3ED_{scene}{args.name}.txt", traj_est
             )
 
     else:
         if args.save_trajectory:
             os.makedirs("saved_trajectories", exist_ok=True)
             file_interface.write_tum_trajectory_file(
-                f"saved_trajectories/M3ED_{scene}.txt", traj_est
+                f"saved_trajectories/M3ED_{scene}{args.name}.txt", traj_est
             )
 
         if args.plot:
@@ -165,7 +192,7 @@ with h5py.File(args.data_h5) as f:
                 traj_est,
                 None,
                 f"M3ED {scene}",
-                f"trajectory_plots/M3ED_{scene}.pdf",
+                f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
                 align=True,
                 correct_scale=True,
             )
