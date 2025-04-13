@@ -43,11 +43,18 @@ parser.add_argument("--save_colmap", action="store_true")
 parser.add_argument("--save_trajectory", action="store_true")
 parser.add_argument("--stride", type=int, default=2)
 parser.add_argument("--skip", type=int, default=0)
+parser.add_argument("--timeit-file", type=str, default=None)
 
 args = parser.parse_args()
 
 cfg.merge_from_file(args.config)
 cfg.merge_from_list(args.opts)
+
+if args.scene is not None:
+    scene = args.scene
+else:
+    scene = os.path.splitext(os.path.basename(args.data_h5))[0]
+print(f"Processing M3ED_{scene}{args.name}")
 
 with h5py.File(args.data_h5) as f:
     if args.print_h5:
@@ -91,12 +98,12 @@ with h5py.File(args.data_h5) as f:
     image = data[0]
     if args.scale != 1.0:
         image = cv2.resize(image, (0, 0), fx=args.scale, fy=args.scale)
-    H, W, _ = image.shape
+    H, W = image.shape[:2]
 
     if args.profile:
         profile = cProfile.Profile()
         profile.enable()
-    
+
     if args.clahe:
         clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(8, 8))
 
@@ -129,7 +136,7 @@ with h5py.File(args.data_h5) as f:
             if slam is None:
                 _, H, W = image.shape
 
-            with Timer("SLAM", enabled=args.timeit):
+            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
                 slam(t, image, intrinsics_new)
             if args.show:
                 cv2.waitKey(1)
@@ -153,64 +160,50 @@ with h5py.File(args.data_h5) as f:
         timestamps=tstamps,
     )
 
-    if args.scene is not None:
-        scene = args.scene
-    else:
-        scene = os.path.splitext(os.path.basename(args.data_h5))[0]
-
-    if args.gt is not None:
-        traj_ref = file_interface.read_tum_trajectory_file(args.gt)
-        traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
-
-        result = main_ape.ape(
-            traj_ref,
-            traj_est,
-            est_name="traj",
-            pose_relation=PoseRelation.translation_part,
-            align=True,
-            correct_scale=True,
+    if args.save_trajectory:
+        os.makedirs("saved_trajectories", exist_ok=True)
+        file_interface.write_tum_trajectory_file(
+            f"saved_trajectories/M3ED_{scene}{args.name}.txt", traj_est
         )
-        ate_score = result.stats["rmse"]
-        print(f"ATE: {ate_score:.03f}")
-        print(result.stats)
-
-        if args.plot:
-            os.makedirs("trajectory_plots", exist_ok=True)
-            plot_trajectory(
-                traj_est,
-                traj_ref,
-                f"M3ED {scene} (ATE: {ate_score:.03f})",
-                f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
-                align=True,
-                correct_scale=True,
-            )
-
-        if args.save_trajectory:
-            os.makedirs("saved_trajectories", exist_ok=True)
-            file_interface.write_tum_trajectory_file(
-                f"saved_trajectories/M3ED_{scene}{args.name}.txt", traj_est
-            )
-
-    else:
-        if args.save_trajectory:
-            os.makedirs("saved_trajectories", exist_ok=True)
-            file_interface.write_tum_trajectory_file(
-                f"saved_trajectories/M3ED_{scene}{args.name}.txt", traj_est
-            )
-
-        if args.plot:
-            os.makedirs("trajectory_plots", exist_ok=True)
-            plot_trajectory(
-                traj_est,
-                None,
-                f"M3ED {scene}",
-                f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
-                align=True,
-                correct_scale=True,
-            )
 
     if args.save_ply:
         save_ply(scene, points, colors)
 
     if args.save_colmap:
         save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics, H, W)
+
+    ate_score = None
+    if args.gt is not None:
+        traj_ref = file_interface.read_tum_trajectory_file(args.gt)
+        traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
+
+        try:
+            result = main_ape.ape(
+                traj_ref,
+                traj_est,
+                est_name="traj",
+                pose_relation=PoseRelation.translation_part,
+                align=True,
+                correct_scale=True,
+            )
+            ate_score = result.stats["rmse"]
+            print(f"ATE: {ate_score:.03f}")
+            print(result.stats)
+            plot_name = f"M3ED {scene} (ATE: {ate_score:.03f})"
+        except np.linalg.LinAlgError:
+            print("Error in trajectory association, skipping ATE calculation.")
+            ate_score = None
+            plot_name = f"M3ED {scene} (ATE: NaN)"
+    else:
+        plot_name = f"M3ED {scene}"
+
+    if args.plot:
+        os.makedirs("trajectory_plots", exist_ok=True)
+        plot_trajectory(
+            traj_est,
+            traj_ref if ate_score is not None else None,
+            plot_name,
+            f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
+            align=True,
+            correct_scale=True,
+        )
