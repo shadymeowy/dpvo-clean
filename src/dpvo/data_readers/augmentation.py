@@ -73,3 +73,78 @@ class RGBDAugmentor:
             images = self.color_transform(images)
 
         return self.spatial_transform(images, depths, poses, intrinsics)
+
+
+def voxel_color_jitter(voxels, EPS=1e-4):
+    N, bins, H, W = voxels.shape
+    voxels = voxels + (torch.rand_like(voxels) - 0.5) * 2 * EPS
+    return voxels
+
+
+class EVSDAugmentor:
+    """perform augmentation on EVS-D video"""
+
+    def __init__(self, crop_size):
+        self.crop_size = crop_size
+        self.max_scale = 0.25
+
+    def voxel_spatial_transform(
+        self, voxels, poses, depths, intrinsics, fix_scale=None
+    ):
+        """cropping and resizing"""
+        # voxels: (N, bins, H, W)
+        ht, wd = voxels.shape[2:]
+
+        max_scale = self.max_scale
+        if fix_scale is None:
+            scale = 1
+            min_scale = np.log2(
+                np.maximum(
+                    (self.crop_size[0] + 1) / float(ht),
+                    (self.crop_size[1] + 1) / float(wd),
+                )
+            )
+            if np.random.rand() < 0.8:
+                scale = 2 ** np.random.uniform(min_scale, max_scale)
+        else:
+            scale = fix_scale
+            min_scale = np.log2(fix_scale)
+            if min_scale < max_scale:
+                scale = 2 ** np.random.uniform(min_scale, max_scale)
+
+        intrinsics = scale * intrinsics
+        depths = depths.unsqueeze(dim=1)
+
+        voxels = F.interpolate(
+            voxels,
+            scale_factor=scale,
+            mode="bilinear",
+            align_corners=False,
+            recompute_scale_factor=True,
+        )
+        depths = F.interpolate(
+            depths, scale_factor=scale, recompute_scale_factor=True
+        )  #
+
+        y0 = (voxels.shape[2] - self.crop_size[0]) // 2
+        x0 = (voxels.shape[3] - self.crop_size[1]) // 2
+
+        intrinsics = intrinsics - torch.tensor([0.0, 0.0, x0, y0])
+        voxels = voxels[:, :, y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
+        depths = depths[:, :, y0 : y0 + self.crop_size[0], x0 : x0 + self.crop_size[1]]
+
+        depths = depths.squeeze(dim=1)
+
+        return voxels, poses, depths, intrinsics
+
+    def voxel_color_transform(self, voxels):
+        """voxel value trafos"""
+        voxels = voxel_color_jitter(voxels)
+        return voxels
+
+    def __call__(self, voxels, poses, depths, intrinsics):
+        fix_scale = None
+        voxels = self.voxel_color_transform(voxels)
+        return self.voxel_spatial_transform(
+            voxels, poses, depths, intrinsics, fix_scale
+        )

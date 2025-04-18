@@ -17,3 +17,12 @@ MOTION_DAMPING: 0.5
 MIXED_PRECISION: True
 
 CENTROID_SEL_STRAT: 'RANDOM'
+
+# DEVO specific?
+# Select between random, gradient, scorer
+PATCH_SELECTOR: 'scorer'
+# Normalizer (only evs): none, rescale, standard (std)
+NORM: 'std'
+# Eval mode of patch selector (random, topk, multinomial)
+SCORER_EVAL_MODE: 'multi'
+SCORER_EVAL_USE_GRID: True

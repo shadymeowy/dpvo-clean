@@ -121,33 +121,36 @@ DIM = 32
 
 
 class BasicEncoder(nn.Module):
-    def __init__(self, output_dim=128, norm_fn="batch", dropout=0.0, multidim=False):
+    def __init__(
+        self, output_dim=128, dim=DIM, norm_fn="batch", dropout=0.0, multidim=False
+    ):
         super(BasicEncoder, self).__init__()
         self.norm_fn = norm_fn
         self.multidim = multidim
+        self.dim = dim
 
         if self.norm_fn == "group":
-            self.norm1 = nn.GroupNorm(num_groups=8, num_channels=DIM)
+            self.norm1 = nn.GroupNorm(num_groups=8, num_channels=self.dim)
 
         elif self.norm_fn == "batch":
-            self.norm1 = nn.BatchNorm2d(DIM)
+            self.norm1 = nn.BatchNorm2d(self.dim)
 
         elif self.norm_fn == "instance":
-            self.norm1 = nn.InstanceNorm2d(DIM)
+            self.norm1 = nn.InstanceNorm2d(self.dim)
 
         elif self.norm_fn == "none":
             self.norm1 = nn.Sequential()
 
-        self.conv1 = nn.Conv2d(3, DIM, kernel_size=7, stride=2, padding=3)
+        self.conv1 = nn.Conv2d(3, self.dim, kernel_size=7, stride=2, padding=3)
         self.relu1 = nn.ReLU(inplace=True)
 
-        self.in_planes = DIM
-        self.layer1 = self._make_layer(DIM, stride=1)
-        self.layer2 = self._make_layer(2 * DIM, stride=2)
-        self.layer3 = self._make_layer(4 * DIM, stride=2)
+        self.in_planes = self.dim
+        self.layer1 = self._make_layer(self.dim, stride=1)
+        self.layer2 = self._make_layer(2 * self.dim, stride=2)
+        self.layer3 = self._make_layer(4 * self.dim, stride=2)
 
         # output convolution
-        self.conv2 = nn.Conv2d(4 * DIM, output_dim, kernel_size=1)
+        self.conv2 = nn.Conv2d(4 * self.dim, output_dim, kernel_size=1)
 
         if self.multidim:
             self.layer4 = self._make_layer(256, stride=2)
@@ -204,32 +207,42 @@ class BasicEncoder(nn.Module):
 
 
 class BasicEncoder4(nn.Module):
-    def __init__(self, output_dim=128, norm_fn="batch", dropout=0.0, multidim=False):
+    def __init__(
+        self,
+        bins=5,
+        output_dim=128,
+        dim=DIM,
+        norm_fn="batch",
+        dropout=0.0,
+        multidim=False,
+    ):
         super(BasicEncoder4, self).__init__()
         self.norm_fn = norm_fn
         self.multidim = multidim
+        self.bins = bins
+        self.dim = dim
 
         if self.norm_fn == "group":
-            self.norm1 = nn.GroupNorm(num_groups=8, num_channels=DIM)
+            self.norm1 = nn.GroupNorm(num_groups=8, num_channels=self.dim)
 
         elif self.norm_fn == "batch":
-            self.norm1 = nn.BatchNorm2d(DIM)
+            self.norm1 = nn.BatchNorm2d(self.dim)
 
         elif self.norm_fn == "instance":
-            self.norm1 = nn.InstanceNorm2d(DIM)
+            self.norm1 = nn.InstanceNorm2d(self.dim)
 
         elif self.norm_fn == "none":
             self.norm1 = nn.Sequential()
 
-        self.conv1 = nn.Conv2d(3, DIM, kernel_size=7, stride=2, padding=3)
+        self.conv1 = nn.Conv2d(self.bins, self.dim, kernel_size=7, stride=2, padding=3)
         self.relu1 = nn.ReLU(inplace=True)
 
-        self.in_planes = DIM
-        self.layer1 = self._make_layer(DIM, stride=1)
-        self.layer2 = self._make_layer(2 * DIM, stride=2)
+        self.in_planes = self.dim
+        self.layer1 = self._make_layer(self.dim, stride=1)
+        self.layer2 = self._make_layer(2 * self.dim, stride=2)
 
         # output convolution
-        self.conv2 = nn.Conv2d(2 * DIM, output_dim, kernel_size=1)
+        self.conv2 = nn.Conv2d(2 * self.dim, output_dim, kernel_size=1)
 
         if dropout > 0:
             self.dropout = nn.Dropout2d(p=dropout)
