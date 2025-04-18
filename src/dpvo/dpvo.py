@@ -15,48 +15,6 @@ from .utils import Timer, flatmeshgrid
 
 mp.set_start_method("spawn", True)
 
-
-def visualize_matched_patch(img1, img2, coord1, coord2, patch_size=3, weight=0.5):
-    """
-    Visualizes a matched patch in two images by drawing rectangles around the patch and a green line/dot with adjustable alpha.
-
-    Parameters:
-    img1 (numpy.ndarray): First image.
-    img2 (numpy.ndarray): Second image.
-    coord1 (tuple): (x, y) coordinates of the top-left corner of the patch in img1.
-    coord2 (tuple): (x, y) coordinates of the top-left corner of the patch in img2.
-    patch_size (int): Size of the patch (default is 3x3).
-    weight (float): Transparency level for the green overlays (0 to 1).
-    """
-    # Copy images to avoid modifying originals
-    img1_vis = img1.copy()
-    img2_vis = img2.copy()
-
-    # Define bottom-right coordinates
-    bottom_right1 = (coord1[0] + patch_size, coord1[1] + patch_size)
-    bottom_right2 = (coord2[0] + patch_size, coord2[1] + patch_size)
-
-    # Define green color with alpha based on weight
-    green_color = (0, int(255 * weight), 0)
-    thickness = 2
-
-    # Draw rectangles around the matched patches
-    cv2.rectangle(img1_vis, coord1, bottom_right1, green_color, thickness)
-    cv2.rectangle(img2_vis, coord2, bottom_right2, green_color, thickness)
-
-    # Concatenate images side by side for visualization
-    concatenated = np.hstack((img1_vis, img2_vis))
-
-    # Draw a green line connecting the patch centers with transparency
-    center1 = (coord1[0] + patch_size // 2, coord1[1] + patch_size // 2)
-    center2 = (coord2[0] + img1.shape[1] + patch_size // 2, coord2[1] + patch_size // 2)
-    cv2.line(concatenated, center1, center2, green_color, thickness, cv2.LINE_AA)
-
-    # Show the image
-    cv2.imshow("Matched Patch Visualization", concatenated)
-    cv2.waitKey(10)
-
-
 autocast = torch.amp.autocast
 Id = SE3.Identity(1, device="cuda")
 
