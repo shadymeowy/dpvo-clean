@@ -100,7 +100,7 @@ with h5py.File(args.data_h5) as f:
     print(f"last event: {event_t[-1] / 1e6:.3f} s")
 
     N = int(duration / args.period * 1e3)
-    H, W = resolution[1], resolution[0]
+    H, W = int(resolution[1]), int(resolution[0])
 
     if args.profile:
         profile = cProfile.Profile()
@@ -108,7 +108,7 @@ with h5py.File(args.data_h5) as f:
 
     with torch.no_grad():
         intrinsics_new = torch.from_numpy(intrinsics_new).cuda()
-        slam = DEVO(cfg, args.network, ht=H, wd=W, evs=True)
+        slam = DEVO(cfg, args.network, ht=H, wd=W)
 
         bins = 5
         voxel_flat = np.zeros((bins + 1, H, W), dtype=np.float32)
@@ -167,8 +167,8 @@ with h5py.File(args.data_h5) as f:
                 cv2.imshow("voxel", img)
                 cv2.waitKey(1)
 
-        points = slam.points_.cpu().numpy()[: slam.m]
-        colors = slam.colors_.view(-1, 3).cpu().numpy()[: slam.m]
+        points = slam.pg.points_.cpu().numpy()[: slam.m]
+        colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
 
         poses, tstamps = slam.terminate()
 
