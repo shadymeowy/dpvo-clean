@@ -11,7 +11,7 @@ class Timer(ContextDecorator):
         self.name = name
         self.enabled = enabled
         self.file = file
-        #print(f"Timer {self.name} enabled: {self.enabled} with file: {self.file}")
+        # print(f"Timer {self.name} enabled: {self.enabled} with file: {self.file}")
 
         if self.enabled:
             self.start = torch.cuda.Event(enable_timing=True)
@@ -30,8 +30,9 @@ class Timer(ContextDecorator):
             elapsed = self.start.elapsed_time(self.end)
             all_times.append(elapsed)
             print(f"{self.name} {elapsed:.03f}")
-            with open(self.file, "a") as f:
-                f.write(f"{self.name} {elapsed:.03f}\n")
+            if self.file is not None:
+                with open(self.file, "a") as f:
+                    f.write(f"{self.name} {elapsed:.03f}\n")
 
 
 def coords_grid(b, n, h, w, **kwargs):
@@ -48,9 +49,6 @@ def coords_grid_with_index(d, **kwargs):
     # i = torch.ones_like(d)
     x = torch.arange(0, w, dtype=torch.float, **kwargs)
     y = torch.arange(0, h, dtype=torch.float, **kwargs)
-
-
-
 
     y, x = torch.stack(torch.meshgrid(y, x, indexing="ij"))
     y = y.view(1, 1, h, w).repeat(b, n, 1, 1)
