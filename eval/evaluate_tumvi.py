@@ -6,15 +6,16 @@ import cv2
 import evo.main_ape as main_ape
 import numpy as np
 import torch
-from dpvo.config import cfg
-from dpvo.dpvo import DPVO
-from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
-from dpvo.utils import Timer
 from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
 from tqdm import tqdm
+
+from dpvo.config import cfg
+from dpvo.dpvo import DPVO
+from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
+from dpvo.utils import Timer
 
 
 def parse_cam_calib(txt):
@@ -37,7 +38,13 @@ parser.add_argument("--scene", default=None)
 parser.add_argument("--network", default="weights/dpvo.pth")
 parser.add_argument("--camera", default="cam0")
 parser.add_argument("--timeit", action="store_true")
-parser.add_argument("--target-intrinsics", nargs=4, type=float, default=None, metavar=("fx", "fy", "cx", "cz"))
+parser.add_argument(
+    "--target-intrinsics",
+    nargs=4,
+    type=float,
+    default=None,
+    metavar=("fx", "fy", "cx", "cz"),
+)
 parser.add_argument("--show", action="store_true")
 
 parser.add_argument("--config", default="config/default.yaml")
