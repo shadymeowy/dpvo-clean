@@ -33,7 +33,7 @@ def compute_remap(K, distortion, W, H):
 
 def voxel_to_img(voxel):
     img = voxel[-1]
-    img = img / img.max() * 255
+    img = (img-img.min()) / (img.max()-img.min()) * 255
     img = img.astype(np.uint8)
     # img = cv2.applyColorMap(img, cv2.COLORMAP_JET)
     return img
