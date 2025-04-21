@@ -15,7 +15,9 @@ def plot_trajectory(
 
     if gt_traj is not None:
         assert isinstance(gt_traj, PoseTrajectory3D)
-        gt_traj, pred_traj = sync.associate_trajectories(gt_traj, pred_traj)
+        gt_traj, pred_traj = sync.associate_trajectories(
+            gt_traj, pred_traj, max_diff=0.1
+        )
 
         if align:
             pred_traj.align(gt_traj, correct_scale=correct_scale)
