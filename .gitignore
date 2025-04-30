@@ -175,3 +175,5 @@ cython_debug/
 saved_trajectories/
 timings/
 trajectory_plots/
+saved_matches/
+saved_point_clouds/
