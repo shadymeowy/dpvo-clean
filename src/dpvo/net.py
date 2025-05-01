@@ -234,12 +234,23 @@ class ePatchifier(nn.Module):
         return fmap, gmap, imap, patches, index
 
 
+class SobolSampler:
+    def __init__(self, dim=2):
+        self.dim = dim
+        self.sobol = torch.quasirandom.SobolEngine(dim, scramble=True)
+
+    def sample(self, n):
+        points = self.sobol.draw(n) + torch.randn(n, self.dim) / n
+        return points
+
+
 class Patchifier(nn.Module):
     def __init__(self, patch_size=3):
         super(Patchifier, self).__init__()
         self.patch_size = patch_size
         self.fnet = BasicEncoder4(output_dim=128, norm_fn="instance", bins=3)
         self.inet = BasicEncoder4(output_dim=DIM, norm_fn="none", bins=3)
+        self.sobol = SobolSampler(dim=2)
 
     def __image_gradient(self, images):
         gray = ((images + 0.5) * (255.0 / 2)).sum(dim=2)
@@ -282,6 +293,13 @@ class Patchifier(nn.Module):
         elif centroid_sel_strat == "RANDOM":
             x = torch.randint(1, w - 1, size=[n, patches_per_image], device="cuda")
             y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
+
+        elif centroid_sel_strat == "SOBOL":
+            points = self.sobol.sample(n * patches_per_image).view(
+                n, patches_per_image, 2
+            )
+            x = (points[..., 0] * (w - 2)).clamp(min=2, max=w - 3).long().cuda()
+            y = (points[..., 1] * (h - 2)).clamp(min=2, max=h - 3).long().cuda()
 
         else:
             raise NotImplementedError(
