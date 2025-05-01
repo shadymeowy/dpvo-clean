@@ -96,3 +96,57 @@ def save_ply(name: str, points: np.ndarray, colors: np.ndarray):
     )
     PlyData([el], text=True).write(f"{name}.ply")
     print(f"Saved {name}.ply")
+
+
+def save_point_cloud(
+    name: str,
+    traj_est: PoseTrajectory3D,
+    points: np.ndarray,
+    points_idx: np.ndarray,
+    colors: np.ndarray,
+):
+    """
+    Saves a point cloud and camera trajectory in a custom format to a single file.
+
+    Each line in the file contains the following information:
+    T X Y Z QX QY QZ QW [PX PY PZ R G B]+
+
+    Where:
+    - T: Timestamp of the camera pose.
+    - X, Y, Z: Position of the camera in 3D space.
+    - QX, QY, QZ, QW: Orientation of the camera as a quaternion.
+    - PX, PY, PZ: Position of a 3D point in the point cloud.
+    - R, G, B: Color of the 3D point (in RGB format).
+
+    This format allows storing both the camera trajectory and the associated point cloud
+    in a single file for easy visualization and analysis.
+    """
+
+    dct = {}
+    for i, idx in enumerate(points_idx):
+        if idx not in dct:
+            dct[idx] = []
+        dct[idx].append(i)
+
+    colors = (colors * 255).astype(np.uint8)
+
+    with open(name, "w") as f:
+        for i, (t, (x, y, z), (qw, qx, qy, qz)) in enumerate(
+            zip(
+                traj_est.timestamps,
+                traj_est.positions_xyz,
+                traj_est.orientations_quat_wxyz,
+            )
+        ):
+            f.write(f"{t} {x} {y} {z} {qx} {qy} {qz} {qw}")
+            if i not in dct:
+                f.write("\n")
+                continue
+            for j in dct[i]:
+                point = points[j]
+                color = colors[j]
+                f.write(
+                    f" {point[0]} {point[1]} {point[2]} {color[0]} {color[1]} {color[2]}"
+                )
+            f.write("\n")
+    print(f"Saved {name}")
