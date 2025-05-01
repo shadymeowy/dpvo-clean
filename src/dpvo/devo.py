@@ -20,11 +20,13 @@ Id = SE3.Identity(1, device="cuda")
 
 
 class DEVO:
-    def __init__(self, cfg, network, ht=480, wd=640, viz=False):
+    def __init__(self, cfg, network, ht=480, wd=640, viz=False, show=False):
         self.cfg = cfg
         self.load_weights(network)
         self.is_initialized = False
         self.enable_timing = False
+        self.show = show
+        self.concatenated_image = None
         torch.set_num_threads(2)
 
         self.M = self.cfg.PATCHES_PER_FRAME
@@ -625,17 +627,19 @@ class DEVO:
             self.long_term_lc.attempt_loop_closure(self.n)
             self.long_term_lc.lc_callback()
 
-        if len(self.images) > 20:
-            self.visualize_patches()
+        if self.show:
+            try:
+                self.visualize_patches()
+            except Exception as e:
+                print(f"Error in visualize_patches: {e}")
 
     def visualize_patches(self):
-        return
         # Get the graph
         ii = self.pg.ii.cpu().numpy()
         jj = self.pg.jj.cpu().numpy()
         kk = self.pg.kk.cpu().numpy()
 
-        choose_rand = True
+        choose_rand = False
 
         if choose_rand:
             # First choose a random source frame to visualize
@@ -647,15 +651,21 @@ class DEVO:
             # Choose a random target frame to visualize
             target_idx = random.randint(jj[roi_tmp].min(), jj[roi_tmp].max())
         else:
-            source_idx = self.pg.ii.max().item() - 5
+            source_idx = self.pg.ii.max().item() - 1
             target_idx = source_idx + 1
 
         # Now, get the roi
         roi = np.where((ii == source_idx) & (jj == target_idx))
 
         # Get the frames to visualize
-        img1_vis = self.images[source_idx].copy()
-        img2_vis = self.images[target_idx].copy()
+        img1_vis = self.images[source_idx][:, :, -1]
+        img1_vis = 255 * (img1_vis - img1_vis.min()) / (img1_vis.max() - img1_vis.min())
+        img1_vis = img1_vis.astype(np.uint8)
+        img1_vis = cv2.cvtColor(img1_vis, cv2.COLOR_GRAY2BGR)
+        img2_vis = self.images[target_idx][:, :, -1]
+        img2_vis = 255 * (img2_vis - img2_vis.min()) / (img2_vis.max() - img2_vis.min())
+        img2_vis = img2_vis.astype(np.uint8)
+        img2_vis = cv2.cvtColor(img2_vis, cv2.COLOR_GRAY2BGR)
         cv2.putText(
             img1_vis,
             f"Source Idx : {source_idx}",
@@ -686,6 +696,8 @@ class DEVO:
                 self.pg.target[0, roi[0][con_idx]].cpu().numpy() * 4
             ).astype(int)
             weight = self.pg.weight[0, roi[0][con_idx]].cpu().numpy().sum() * 0.5
+            if weight < 0.1:
+                continue
 
             B = int(255 * (0.5 - abs(0.5 - weight)))
             G = int(255 * weight)
@@ -701,10 +713,11 @@ class DEVO:
             center1 = (source_coord[0], source_coord[1])
             center2 = (target_coord[0] + img1_vis.shape[1], target_coord[1])
             cv2.line(concatenated, center1, center2, color, 2, cv2.LINE_AA)
+            # cv2.circle(concatenated, center1, 3, color, -1)
+            # cv2.circle(concatenated, center2, 3, color, -1)
 
-        cv2.imshow("Lines", concatenated)
-        key = cv2.waitKey()
+        cv2.imshow("matches", concatenated)
+        self.concatenated_image = concatenated
+        key = cv2.waitKey(1)
         if key == ord("a"):
             exit()
-
-        print(source_coord)
