@@ -696,8 +696,6 @@ class DEVO:
                 self.pg.target[0, roi[0][con_idx]].cpu().numpy() * 4
             ).astype(int)
             weight = self.pg.weight[0, roi[0][con_idx]].cpu().numpy().sum() * 0.5
-            if weight < 0.1:
-                continue
 
             B = int(255 * (0.5 - abs(0.5 - weight)))
             G = int(255 * weight)
