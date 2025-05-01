@@ -9,16 +9,22 @@ import evo.main_ape as main_ape
 import h5py
 import numpy as np
 import torch
-from dpvo.config import cfg
-from dpvo.dpvo import DPVO
-from dpvo.parallel import pgenerator
-from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
-from dpvo.utils import Timer
 from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
 from tqdm import tqdm
+
+from dpvo.config import cfg
+from dpvo.dpvo import DPVO
+from dpvo.parallel import pgenerator
+from dpvo.plot_utils import (
+    plot_trajectory,
+    save_output_for_COLMAP,
+    save_ply,
+    save_point_cloud,
+)
+from dpvo.utils import Timer
 
 
 def rgb_generator(
@@ -95,9 +101,11 @@ def main():
     parser.add_argument("--save_ply", action="store_true")
     parser.add_argument("--save_colmap", action="store_true")
     parser.add_argument("--save_trajectory", action="store_true")
+    parser.add_argument("--save_point_cloud", action="store_true")
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--skip", type=int, default=0)
     parser.add_argument("--timeit-file", type=str, default=None)
+    parser.add_argument("--save_matches", action="store_true")
 
     args = parser.parse_args()
 
@@ -119,16 +127,18 @@ def main():
             resolution = f.get(f"{args.camera}/calib/resolution")[()] * args.scale
             H, W = int(resolution[1]), int(resolution[0])
 
-        slam = DPVO(cfg, args.network, ht=H, wd=W)
-        for t, image, intrinsics in pgenerator(
-            rgb_generator,
-            path=args.data_h5,
-            camera_name=args.camera,
-            start=args.skip,
-            end=args.end,
-            stride=args.stride,
-            scale=args.scale,
-            clahe=args.clahe,
+        slam = DPVO(cfg, args.network, ht=H, wd=W, show=args.show)
+        for i, (t, image, intrinsics) in enumerate(
+            pgenerator(
+                rgb_generator,
+                path=args.data_h5,
+                camera_name=args.camera,
+                start=args.skip,
+                end=args.end,
+                stride=args.stride,
+                scale=args.scale,
+                clahe=args.clahe,
+            )
         ):
             if args.show:
                 cv2.imshow("image", image)
@@ -139,8 +149,16 @@ def main():
             with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
                 slam(t, image, intrinsics)
 
+            if args.save_matches and slam.concatenated_image is not None:
+                os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
+                cv2.imwrite(
+                    f"saved_matches/M3ED_{scene}{args.name}/{i:06d}.jpg",
+                    slam.concatenated_image,
+                )
+
         points = slam.pg.points_.cpu().numpy()[: slam.m]
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
+        points_idx = slam.pg.tstamps_[slam.pg.ix[: slam.m].cpu().numpy()]
 
         poses, tstamps = slam.terminate()
 
@@ -169,6 +187,16 @@ def main():
 
     if args.save_colmap:
         save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics, H, W)
+
+    if args.save_point_cloud:
+        os.makedirs("saved_point_clouds", exist_ok=True)
+        save_point_cloud(
+            f"saved_point_clouds/M3ED_{scene}{args.name}.viz.txt",
+            traj_est,
+            points,
+            points_idx,
+            colors,
+        )
 
     ate_score = None
     if args.gt is not None:
