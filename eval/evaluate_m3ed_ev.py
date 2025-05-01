@@ -9,6 +9,12 @@ import evo.main_ape as main_ape
 import h5py
 import numpy as np
 import torch
+from evo.core import sync
+from evo.core.metrics import PoseRelation
+from evo.core.trajectory import PoseTrajectory3D
+from evo.tools import file_interface
+from tqdm import tqdm
+
 from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
@@ -17,16 +23,18 @@ from dpvo.event import (
     voxel_to_img,
 )
 from dpvo.parallel import pgenerator
-from dpvo.plot_utils import plot_trajectory, save_output_for_COLMAP, save_ply
+from dpvo.plot_utils import (
+    plot_trajectory,
+    save_output_for_COLMAP,
+    save_ply,
+    save_point_cloud,
+)
 from dpvo.utils import Timer
-from evo.core import sync
-from evo.core.metrics import PoseRelation
-from evo.core.trajectory import PoseTrajectory3D
-from evo.tools import file_interface
-from tqdm import tqdm
 
 
-def ev_generator(path, camera_name, period, t_limits=(None, None), scale=1.0, bins=5):
+def ev_generator(
+    path, camera_name, period, t_limits=(None, None), scale=1.0, bins=5, stride=1
+):
     f = h5py.File(path, "r")
     camera_model = f.get(f"{camera_name}/calib/camera_model")[()]
     distortion_coeffs = f.get(f"{camera_name}/calib/distortion_coeffs")[()]
@@ -68,7 +76,7 @@ def ev_generator(path, camera_name, period, t_limits=(None, None), scale=1.0, bi
     print("duration", duration)
     print("number of events", len(t))
 
-    for idx in tqdm(range(N1, N2)):
+    for idx in tqdm(range(N1, N2, stride)):
         tperf = time.perf_counter()
         t0_ms = period * idx
         t1_ms = period * (idx + 1)
@@ -88,6 +96,10 @@ def ev_generator(path, camera_name, period, t_limits=(None, None), scale=1.0, bi
             ty = (ty * scale).astype(np.int32)
 
         print("event count", idx1 - idx0)
+        # num_events = idx1 - idx0
+        # if num_events < 200_000:
+        #    print(f"Skipping voxel at {t0_ms}-{t1_ms} ms: only {num_events} events")
+        #    continue
         rect = rect_map[ty, tx]
         x_rect = np.ascontiguousarray(rect[..., 0])
         y_rect = np.ascontiguousarray(rect[..., 1])
@@ -121,6 +133,10 @@ def main():
     parser.add_argument("--scale", type=float, default=1.0)
     parser.add_argument("--start", type=float, default=0)
     parser.add_argument("--stop", type=float, default=None)
+    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--clahe", action="store_true")  # wont work
+    parser.add_argument("--save_point_cloud", action="store_true")
+    parser.add_argument("--save_matches", action="store_true")
 
     args = parser.parse_args()
 
@@ -143,31 +159,42 @@ def main():
             H, W = int(resolution[1]), int(resolution[0])
             bins = 5
 
-        slam = DEVO(cfg, args.network, ht=H, wd=W)
+        slam = DEVO(cfg, args.network, ht=H, wd=W, show=args.show)
 
-        for t, voxel, intrinsics in pgenerator(
-            ev_generator,
-            path=args.data_h5,
-            camera_name=args.camera,
-            period=args.period,
-            size=10,
-            t_limits=(args.start, args.stop),
-            scale=args.scale,
-            bins=bins,
+        for i, (t, voxel, intrinsics) in enumerate(
+            pgenerator(
+                ev_generator,
+                path=args.data_h5,
+                camera_name=args.camera,
+                period=args.period,
+                size=10,
+                t_limits=(args.start, args.stop),
+                scale=args.scale,
+                bins=bins,
+                stride=args.stride,
+            )
         ):
-            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
-                voxel = np.clip(voxel, -32, 32)
-                if args.show:
-                    img = voxel_to_img(voxel)
-                    cv2.imshow("voxel", img)
-                    cv2.waitKey(1)
+            if args.show:
+                img = voxel_to_img(voxel)
+                cv2.imshow("voxel", img)
+                cv2.waitKey(1)
 
-                voxel = torch.from_numpy(voxel).cuda()
-                intrinsics = torch.from_numpy(intrinsics).cuda()
+            voxel = torch.from_numpy(voxel).cuda()
+            intrinsics = torch.from_numpy(intrinsics).cuda()
+
+            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
                 slam(t, voxel, intrinsics)
+
+            if args.save_matches and slam.concatenated_image is not None:
+                os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
+                cv2.imwrite(
+                    f"saved_matches/M3ED_{scene}{args.name}/{i:06d}.jpg",
+                    slam.concatenated_image,
+                )
 
         points = slam.pg.points_.cpu().numpy()[: slam.m]
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
+        points_idx = slam.pg.tstamps_[slam.pg.ix[: slam.m].cpu().numpy()]
 
         poses, tstamps = slam.terminate()
 
@@ -196,6 +223,16 @@ def main():
 
     if args.save_colmap:
         save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics, H, W)
+
+    if args.save_point_cloud:
+        os.makedirs("saved_point_clouds", exist_ok=True)
+        save_point_cloud(
+            f"saved_point_clouds/M3ED_{scene}{args.name}.viz.txt",
+            traj_est,
+            points,
+            points_idx,
+            colors,
+        )
 
     ate_score = None
     if args.gt is not None:
