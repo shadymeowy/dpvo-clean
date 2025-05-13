@@ -172,8 +172,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Project-specific files
 saved_trajectories/
 timings/
 trajectory_plots/
 saved_matches/
 saved_point_clouds/
+evalgen/
+
+# VSCode
+.vscode/
