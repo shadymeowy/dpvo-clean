@@ -250,7 +250,8 @@ class Patchifier(nn.Module):
         self.patch_size = patch_size
         self.fnet = BasicEncoder4(output_dim=128, norm_fn="instance", bins=3)
         self.inet = BasicEncoder4(output_dim=DIM, norm_fn="none", bins=3)
-        self.sobol = SobolSampler(dim=2)
+        self.sobol = None
+        self.dedode = None
 
     def __image_gradient(self, images):
         gray = ((images + 0.5) * (255.0 / 2)).sum(dim=2)
@@ -294,7 +295,46 @@ class Patchifier(nn.Module):
             x = torch.randint(1, w - 1, size=[n, patches_per_image], device="cuda")
             y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
 
+        elif centroid_sel_strat == "DEDODE":
+            if self.dedode is None:
+                from kornia.feature import DeDoDe
+
+                self.dedode = DeDoDe.from_pretrained(
+                    detector_weights="L-upright", descriptor_weights="B-upright"
+                )
+
+            images_scaled = F.resize(
+                images[0], (images.shape[3] // 2, images.shape[4] // 2)
+            )
+            keypoints, scores = self.dedode.detect(
+                0.5 * (images_scaled.to(torch.float32) + 0.5), n=512
+            )
+            keypoints = keypoints[:, torch.randperm(keypoints.shape[1])[:48]]
+            x1 = (
+                (w * 0.5 * (keypoints[:, :, 0] + 1))
+                .clamp(1, w - 1)
+                .floor()
+                .to(torch.int32)
+            )
+            y1 = (
+                (h * 0.5 * (keypoints[:, :, 1] + 1))
+                .clamp(1, h - 1)
+                .floor()
+                .to(torch.int32)
+            )
+            x2 = torch.randint(
+                1, w - 1, size=[n, 96 - keypoints.shape[1]], device="cuda"
+            )
+            y2 = torch.randint(
+                1, h - 1, size=[n, 96 - keypoints.shape[1]], device="cuda"
+            )
+            x = torch.concat([x1, x2], dim=-1)
+            y = torch.concat([y1, y2], dim=-1)
+
         elif centroid_sel_strat == "SOBOL":
+            if self.sobol is None:
+                self.sobol = SobolSampler(dim=2)
+
             points = self.sobol.sample(n * patches_per_image).view(
                 n, patches_per_image, 2
             )
