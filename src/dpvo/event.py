@@ -33,7 +33,7 @@ def compute_remap(K, distortion, W, H):
 
 def voxel_to_img(voxel):
     img = voxel[-1]
-    img = (img-img.min()) / (img.max()-img.min()) * 255
+    img = (img - img.min()) / (img.max() - img.min()) * 255
     img = img.astype(np.uint8)
     # img = cv2.applyColorMap(img, cv2.COLORMAP_JET)
     return img
@@ -199,3 +199,35 @@ def get_time_indices_offsets(
         idx_end = idx_from_end
 
     return idx_start, idx_end
+
+
+@jit(nopython=True)
+def accumulate_events(frame, xs, ys, ts, ps, alpha=0.05, tau=50.0):
+    H, W = frame.shape
+    t0 = ts[0]
+    t1 = ts[-1]
+
+    alpha = 1e6 / ((t1 - t0) * tau)
+
+    # Decay existing event frame
+    # tmp = np.exp(-alpha)
+    for i in range(H):
+        for j in range(W):
+            frame[i, j] = 0
+
+    # Accumulate new events
+    for i in range(len(xs)):
+        x = xs[i]
+        y = ys[i]
+        t = ts[i]
+        p = -1 if ps[i] == 0 else 1
+
+        if x < 0 or y < 0 or x >= W or y >= H:
+            continue
+
+        frame[y, x] += p * alpha * np.exp(-alpha * (t - t0) / 1e6)
+
+    # Clamp values to [0, 1]
+    for i in range(H):
+        for j in range(W):
+            frame[i, j] = min(max(frame[i, j], 0), 1)
