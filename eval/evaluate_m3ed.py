@@ -28,7 +28,7 @@ from dpvo.utils import Timer
 
 
 def rgb_generator(
-    path, camera_name, start=None, end=None, stride=1, clahe=False, scale=1.0
+    path, camera_name, start=None, stop=None, stride=1, clahe=False, scale=1.0
 ):
     f = h5py.File(path, "r")
     camera_model = f.get(f"{camera_name}/calib/camera_model")[()]
@@ -66,7 +66,7 @@ def rgb_generator(
     print("distortion_model", distortion_model.decode())
     print("distortion_coeffs", distortion_coeffs)
 
-    for t, image in tqdm(islice(zip(ts, data), start, end, stride), total=N):
+    for t, image in tqdm(islice(zip(ts, data), start, stop, stride), total=N):
         if scale != 1.0:
             image = cv2.resize(image, (W, H))
         image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
@@ -92,7 +92,8 @@ def main():
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--name", default="")
     parser.add_argument("--scale", type=float, default=1.0)
-    parser.add_argument("--end", type=int, default=None)
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--stop", type=int, default=None)
     parser.add_argument("--profile", type=str, default=None)
     parser.add_argument("--clahe", action="store_true")
     parser.add_argument("--config", default="config/default.yaml")
@@ -102,10 +103,9 @@ def main():
     parser.add_argument("--save_colmap", action="store_true")
     parser.add_argument("--save_trajectory", action="store_true")
     parser.add_argument("--save_point_cloud", action="store_true")
-    parser.add_argument("--stride", type=int, default=2)
-    parser.add_argument("--skip", type=int, default=0)
-    parser.add_argument("--timeit-file", type=str, default=None)
     parser.add_argument("--save_matches", action="store_true")
+    parser.add_argument("--stride", type=int, default=2)
+    parser.add_argument("--timeit-file", type=str, default=None)
 
     args = parser.parse_args()
 
@@ -133,8 +133,8 @@ def main():
                 rgb_generator,
                 path=args.data_h5,
                 camera_name=args.camera,
-                start=args.skip,
-                end=args.end,
+                start=args.start,
+                stop=args.stop,
                 stride=args.stride,
                 scale=args.scale,
                 clahe=args.clahe,
