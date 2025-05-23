@@ -469,13 +469,14 @@ class DPVO:
 
         image = 2 * (image[None, None] / 255.0) - 0.5
 
-        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
-            fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                image,
-                patches_per_image=self.cfg.PATCHES_PER_FRAME,
-                centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
-                return_color=True,
-            )
+        with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
+            with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+                fmap, gmap, imap, patches, _, clr = self.network.patchify(
+                    image,
+                    patches_per_image=self.cfg.PATCHES_PER_FRAME,
+                    centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
+                    return_color=True,
+                )
 
         ### update state attributes ###
         self.tlist.append(tstamp)

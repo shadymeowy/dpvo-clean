@@ -556,14 +556,15 @@ class DEVO:
         if image.shape[-1] == 346:
             image = image[..., 1:-1]  # hack for MVSEC, FPV,...
 
-        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
-            fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                image,
-                patches_per_image=self.cfg.PATCHES_PER_FRAME,
-                return_color=True,
-                scorer_eval_mode=self.cfg.SCORER_EVAL_MODE,
-                scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID,
-            )
+        with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
+            with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+                fmap, gmap, imap, patches, _, clr = self.network.patchify(
+                    image,
+                    patches_per_image=self.cfg.PATCHES_PER_FRAME,
+                    return_color=True,
+                    scorer_eval_mode=self.cfg.SCORER_EVAL_MODE,
+                    scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID,
+                )
 
         ### update state attributes ###
         self.tlist.append(tstamp)
