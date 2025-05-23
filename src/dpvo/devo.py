@@ -39,7 +39,6 @@ class DEVO:
         self.timing_file = timing_file
         self.show = show
         self.concatenated_image = None
-        torch.set_num_threads(2)
 
         self.M = self.cfg.PATCHES_PER_FRAME
         self.N = self.cfg.BUFFER_SIZE
