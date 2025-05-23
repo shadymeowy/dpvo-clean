@@ -392,24 +392,26 @@ class DEVO:
         self.ran_global_ba[self.n] = True
 
     def update(self):
-        with Timer("other", enabled=self.enable_timing, file=self.timing_file):
+        with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
 
-            with autocast(device_type="cuda", enabled=True):
+        with autocast(device_type="cuda", enabled=True):
+            with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
+            with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
                 self.pg.net, (delta, weight, _) = self.network.update(
                     self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
                 )
 
-            lmbda = torch.as_tensor([1e-4], device="cuda")
-            weight = weight.float()
-            target = coords[..., self.P // 2, self.P // 2] + delta.float()
+        lmbda = torch.as_tensor([1e-4], device="cuda")
+        weight = weight.float()
+        target = coords[..., self.P // 2, self.P // 2] + delta.float()
 
         self.pg.target = target
         self.pg.weight = weight
 
-        with Timer("BA", enabled=self.enable_timing, file=self.timing_file):
+        with Timer("ba", enabled=self.enable_timing, file=self.timing_file):
             try:
                 # run global bundle adjustment if there exist long-range edges
                 if (

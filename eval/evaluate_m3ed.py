@@ -154,7 +154,7 @@ def main():
             image = torch.from_numpy(image).permute(2, 0, 1).cuda()
             intrinsics = torch.from_numpy(intrinsics).cuda()
 
-            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
+            with Timer("total", enabled=args.timeit, file=args.timeit_file):
                 slam(t, image, intrinsics)
 
             if args.save_matches and slam.concatenated_image is not None:

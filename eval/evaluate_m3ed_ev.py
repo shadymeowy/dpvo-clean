@@ -190,7 +190,7 @@ def main():
             voxel = torch.from_numpy(voxel).cuda()
             intrinsics = torch.from_numpy(intrinsics).cuda()
 
-            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
+            with Timer("total", enabled=args.timeit, file=args.timeit_file):
                 slam(t, voxel, intrinsics)
 
             if args.save_matches and slam.concatenated_image is not None:
