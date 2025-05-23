@@ -32,3 +32,6 @@ include-package-data = false
 
 [tool.setuptools.data-files]
 "data" = ["**/*.cuh", "**/*.cu", "**/*.h"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
