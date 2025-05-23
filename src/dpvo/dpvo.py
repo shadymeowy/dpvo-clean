@@ -373,7 +373,7 @@ class DPVO:
         with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
 
-        with autocast(device_type="cuda", enabled=True):
+        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):

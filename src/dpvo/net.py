@@ -13,8 +13,6 @@ from .selector import PatchSelector, Scorer, SelectionMethod
 from .utils import coords_grid_with_index, flatmeshgrid, pyramidify, set_depth
 from .voxel_utils import rescale, std, voxel_augment
 
-autocast = torch.cuda.amp.autocast
-
 DIM = 384
 
 
@@ -404,7 +402,7 @@ class VONet(nn.Module):
         self.DIM = DIM
         self.RES = 4
 
-    @autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def forward(
         self,
         images,
@@ -566,7 +564,7 @@ class eVONet(nn.Module):
         self.norm = norm
         self.randaug = randaug
 
-    @autocast(enabled=False)
+    @torch.amp.autocast("cuda", enabled=False)
     def forward(
         self,
         images,
