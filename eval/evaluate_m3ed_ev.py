@@ -159,7 +159,15 @@ def main():
             H, W = int(resolution[1]), int(resolution[0])
             bins = 5
 
-        slam = DEVO(cfg, args.network, ht=H, wd=W, show=args.show)
+        slam = DEVO(
+            cfg,
+            args.network,
+            ht=H,
+            wd=W,
+            show=args.show,
+            enable_timing=args.timeit,
+            timing_file=args.timeit_file,
+        )
 
         for i, (t, voxel, intrinsics) in enumerate(
             pgenerator(

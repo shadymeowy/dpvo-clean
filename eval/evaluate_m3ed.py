@@ -127,7 +127,15 @@ def main():
             resolution = f.get(f"{args.camera}/calib/resolution")[()] * args.scale
             H, W = int(resolution[1]), int(resolution[0])
 
-        slam = DPVO(cfg, args.network, ht=H, wd=W, show=args.show)
+        slam = DPVO(
+            cfg,
+            args.network,
+            ht=H,
+            wd=W,
+            show=args.show,
+            enable_timing=args.timeit,
+            timing_file=args.timeit_file,
+        )
         for i, (t, image, intrinsics) in enumerate(
             pgenerator(
                 rgb_generator,

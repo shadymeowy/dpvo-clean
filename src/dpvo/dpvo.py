@@ -20,11 +20,23 @@ Id = SE3.Identity(1, device="cuda")
 
 
 class DPVO:
-    def __init__(self, cfg, network, ht=480, wd=640, viz=False, show=False):
+    def __init__(
+        self,
+        cfg,
+        network,
+        ht=480,
+        wd=640,
+        viz=False,
+        show=False,
+        enable_timing=False,
+        timing_file=None,
+        **kwargs,
+    ):
         self.cfg = cfg
         self.load_weights(network)
         self.is_initialized = False
-        self.enable_timing = False
+        self.enable_timing = enable_timing
+        self.timing_file = timing_file
         self.show = show
         self.concatenated_image = None
         torch.set_num_threads(2)
@@ -358,7 +370,7 @@ class DPVO:
         self.ran_global_ba[self.n] = True
 
     def update(self):
-        with Timer("other", enabled=self.enable_timing):
+        with Timer("other", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
 
             with autocast(device_type="cuda", enabled=True):
@@ -375,7 +387,7 @@ class DPVO:
         self.pg.target = target
         self.pg.weight = weight
 
-        with Timer("BA", enabled=self.enable_timing):
+        with Timer("BA", enabled=self.enable_timing, file=self.timing_file):
             try:
                 # run global bundle adjustment if there exist long-range edges
                 if (
