@@ -8,7 +8,7 @@
 #include <ATen/ATen.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/Parallel.h>
-#include "block_e.cuh"
+// #include "block_e.cuh"
 
 #include "BAFactor.h"
 
@@ -785,7 +785,7 @@ void BAFactor::hessian(torch::Tensor Hgg, torch::Tensor vgg)
         // torch::Tensor Qt = torch::transpose(Q, 0, 1);
 
         torch::Tensor S = B - torch::matmul(EQ, Et);
-        torch::Tensor y = v - torch::matmul(EQ,  u)
+        torch::Tensor y = v - torch::matmul(EQ,  u);
 
         S += I * (1e-4 * S + 1.0);
         // S_cpu=B.to(torch::kCPU).to(torch::kFloat64);
