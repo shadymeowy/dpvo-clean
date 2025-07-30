@@ -6,6 +6,8 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "BAFactor.h"
+
 
 std::vector<torch::Tensor> cuda_ba(
     torch::Tensor poses,
@@ -185,5 +187,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("neighbors", &neighbors, "temporal neighboor indicies");
   m.def("reproject", &reproject, "temporal neighboor indicies");
   m.def("solve_system", &solve_system, "temporal neighboor indicies");
+
+  py::class_<BAFactor>(m, "BAFactor")
+      .def(py::init<>())
+      .def("init", &BAFactor::init)
+      .def("hessian", &BAFactor::hessian)
+      .def("retract", &BAFactor::retract);
 
 }

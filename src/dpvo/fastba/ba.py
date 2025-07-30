@@ -2,6 +2,7 @@ import cuda_ba
 
 neighbors = cuda_ba.neighbors
 reproject = cuda_ba.reproject
+BAFactor = cuda_ba.BAFactor
 
 
 def BA(

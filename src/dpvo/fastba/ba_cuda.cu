@@ -10,6 +10,13 @@
 #include <ATen/Parallel.h>
 #include "block_e.cuh"
 
+#include "BAFactor.h"
+
+#include <Eigen/Sparse>
+#include <Eigen/Dense>
+#include <Eigen/SparseCore>
+#include <Eigen/SparseCholesky>
+
 
 #define GPU_1D_KERNEL_LOOP(i, n) \
   for (size_t i = blockIdx.x * blockDim.x + threadIdx.x; i<n; i += blockDim.x * gridDim.x)
@@ -614,4 +621,231 @@ torch::Tensor cuda_reproject(
 
   return coords.view({1, N, 2, P, P});
 
+}
+
+void BAFactor::init(torch::Tensor _poses,
+                  torch::Tensor _patches,
+                  torch::Tensor _intrinsics,
+                  torch::Tensor _target,
+                  torch::Tensor _weight,
+                  torch::Tensor _lmbda,
+                  torch::Tensor _ii,
+                  torch::Tensor _jj, 
+                  torch::Tensor _kk,
+                  int _PPF,//PATCHES_PER_FRAME
+                  int _t0, int _t1, int _iterations, bool eff_impl)
+{
+  lmbda      = _lmbda;
+  ii         = _ii;
+  jj         = _jj;
+  kk         = _kk;
+  PPF        = _PPF;
+  eff_impl   = eff_impl;
+  
+  t0 = _t0;
+  t1 = _t1;
+
+  // std::cout<<"enter"<<std::endl;
+  // std::cout<<_poses.sizes()<<std::endl;
+
+  // auto opts = poses.options();
+  auto opts = torch::TensorOptions()
+    .dtype(torch::kFloat32).device(torch::kCUDA);
+
+  auto ktuple = torch::_unique(kk, true, true);
+  kx = std::get<0>(ktuple);
+  ku = std::get<1>(ktuple);
+  // std::cout<<"unique"<<std::endl;
+
+  // std::cout<<kk.sizes()<<std::endl;
+  // std::cout<<kx.sizes()<<std::endl;
+  // std::cout<<patches.sizes()<<std::endl;
+  const int N = t1 - t0;    // number of poses
+  const int M = kx.size(0); // number of patches
+  const int P = _patches.size(3); //_patches.size(-1); // patch size
+  // std::cout<<"NMP value"<<std::endl;
+
+  poses      = _poses.view({-1, 7});
+  patches    = _patches.view({-1,3,P,P});
+  intrinsics = _intrinsics.view({-1, 4});
+
+  target    = _target.view({-1, 2});
+  weight    = _weight.view({-1, 2});
+
+  const int num = ii.size(0);//所有边的数量
+  // std::cout<<"Get num of edges"<<std::endl;
+
+  B = torch::empty({6*N, 6*N}, opts);//初始化的H矩阵N是帧数（）
+  // E = torch::empty({6*N, 1*M}, opts);
+  E = torch::empty({0, 0}, opts);
+  C = torch::empty({M}, opts);
+  // std::cout<<"Init BEC"<<std::endl;
+
+  v = torch::empty({6*N}, opts);//速度
+  u = torch::empty({1*M}, opts);//速度的权重
+  // std::cout<<"Finish"<<std::endl;
+
+}
+
+void BAFactor::hessian(torch::Tensor Hgg, torch::Tensor vgg)
+{
+    const int N = t1 - t0;
+    const int M = kx.size(0);
+    const int num = ii.size(0);
+
+    torch::Tensor r_total = torch::empty({1}, torch::dtype(torch::kFloat64).device(torch::kCUDA));
+
+    // auto blockE = std::make_unique<EfficentE>();
+    blockE = std::make_unique<EfficentE>();
+  
+    if (eff_impl)
+      blockE = std::make_unique<EfficentE>(ii, jj, kx, PPF, t0);
+    else
+      E = torch::empty({6*N, 1*M}, mdtype);
+
+    B.zero_();
+    E.zero_();
+    C.zero_();
+    v.zero_();
+    u.zero_();
+    r_total.zero_();
+    blockE->E_lookup.zero_();
+
+    v = v.view({6*N});
+    u = u.view({1*M});
+
+  // std::cout<<" reprojection_residuals_and_hessian"<<std::endl;
+
+    reprojection_residuals_and_hessian<<<NUM_BLOCKS(ii.size(0)), NUM_THREADS>>>(
+        poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+        patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+        intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+        target.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+        weight.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+        lmbda.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+        blockE->ij_xself.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
+        ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        kk.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        ku.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        r_total.packed_accessor32<double,1,torch::RestrictPtrTraits>(),
+        blockE->E_lookup.packed_accessor32<mtype,3,torch::RestrictPtrTraits>(),
+        B.packed_accessor32<mtype,2,torch::RestrictPtrTraits>(),
+        E.packed_accessor32<mtype,2,torch::RestrictPtrTraits>(),
+        C.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+        v.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
+        u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(), t0, blockE->ppf);
+
+    v = v.view({6*N, 1});
+    u = u.view({1*M, 1});
+    torch::Tensor Q = 1.0 / (C + lmbda).view({1, M});
+
+    torch::Tensor S_cpu=torch::empty({6*N, 6*N}, torch::dtype(torch::kFloat64).device(torch::kCPU));
+    torch::Tensor y_cpu=torch::empty({6*N, 1}, torch::dtype(torch::kFloat64).device(torch::kCPU));
+
+    if (t1 - t0 == 0) {
+
+      torch::Tensor Qt = torch::transpose(Q, 0, 1);
+      torch::Tensor dZ = Qt * u;
+
+      dZ = dZ.view({M});
+
+      patch_retr_kernel<<<NUM_BLOCKS(M), NUM_THREADS>>>(
+        kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+        dZ.packed_accessor32<float,1,torch::RestrictPtrTraits>());
+
+    }
+    else {
+
+      torch::Tensor Qt = torch::transpose(Q, 0, 1);
+      auto opts = torch::TensorOptions()
+          .dtype(torch::kFloat32).device(torch::kCUDA);
+      torch::Tensor I = torch::eye(6*N, opts);
+
+      if (eff_impl) {
+
+        torch::Tensor EQEt = blockE->computeEQEt(N, Q);
+        torch::Tensor EQu = blockE->computeEv(N, Qt * u);
+
+        torch::Tensor S = B - EQEt;
+        torch::Tensor y = v - EQu;
+
+        S += I * (1e-4 * S + 1.0);
+
+        // S_cpu=B.to(torch::kCPU).to(torch::kFloat64);
+        S_cpu=S.to(torch::kCPU).to(torch::kFloat64);
+        y_cpu = y.to(torch::kCPU).to(torch::kFloat64);
+      
+      }
+      else {
+
+        torch::Tensor EQ = E * Q;
+        torch::Tensor Et = torch::transpose(E, 0, 1);
+        // torch::Tensor Qt = torch::transpose(Q, 0, 1);
+
+        torch::Tensor S = B - torch::matmul(EQ, Et);
+        torch::Tensor y = v - torch::matmul(EQ,  u)
+
+        S += I * (1e-4 * S + 1.0);
+        // S_cpu=B.to(torch::kCPU).to(torch::kFloat64);
+        S_cpu=S.to(torch::kCPU).to(torch::kFloat64);
+        y_cpu = y.to(torch::kCPU).to(torch::kFloat64);
+      }
+      // std::cout<<" finish"<<std::endl;
+      Hgg.copy_(S_cpu);
+      // vgg.copy_(y_cpu);
+      vgg.copy_(y_cpu.squeeze(1));
+    }
+
+    // return {S_cpu, y_cpu};
+  
+}
+
+std::vector<torch::Tensor> BAFactor::retract(torch::Tensor _dx)
+{
+    auto opts = torch::TensorOptions()
+    .dtype(torch::kFloat32).device(torch::kCUDA);
+
+    const int N = t1 - t0;    // number of poses
+    const int M = kx.size(0); // number of patches
+
+    auto _dx_accessor = _dx.accessor<double, 1>();
+    Eigen::VectorXd x((t1-t0)*6);
+    for(int i = 0 ;i<(t1-t0)*6;i++)
+      x(i) = _dx_accessor[i];
+    torch::Tensor dX =torch::from_blob(x.data(), {(t1-t0)*6,1}, torch::TensorOptions()
+      .dtype(torch::kFloat64)).to(torch::kCUDA).to(torch::kFloat32);
+    
+
+    torch::Tensor Q = 1.0 / (C + lmbda).view({1, M});
+    torch::Tensor Qt = torch::transpose(Q, 0, 1);
+
+    torch::Tensor dZ;
+
+    if (eff_impl) {
+
+      torch::Tensor EtdX = blockE->computeEtv(M, dX);
+      dZ = Qt * (u - EtdX);
+
+    }
+    else {
+      torch::Tensor Et = torch::transpose(E, 0, 1);
+      dZ = Qt * (u - torch::matmul(Et, dX));
+    }
+
+    dX = dX.view({N, 6});
+    dZ = dZ.view({M});
+
+    pose_retr_kernel<<<NUM_BLOCKS(N), NUM_THREADS>>>(t0, t1,
+        poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+        dX.packed_accessor32<float,2,torch::RestrictPtrTraits>());
+
+    patch_retr_kernel<<<NUM_BLOCKS(M), NUM_THREADS>>>(
+        kx.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+        patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+        dZ.packed_accessor32<float,1,torch::RestrictPtrTraits>());
+
+    return {};
+ 
 }

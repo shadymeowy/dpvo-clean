@@ -1,3 +1,3 @@
-from .ba import BA, neighbors, reproject
+from .ba import BA, neighbors, reproject, BAFactor
 
-__all__ = ["BA", "neighbors", "reproject"]
+__all__ = ["BA", "neighbors", "reproject", "BAFactor"]
