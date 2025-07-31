@@ -13,7 +13,6 @@ from .net import eVONet
 from .patchgraph import PatchGraph
 from .utils import Timer, flatmeshgrid
 
-mp.set_start_method("spawn", True)
 
 autocast = torch.amp.autocast
 Id = SE3.Identity(1, device="cuda")
@@ -648,6 +647,7 @@ class DEVO:
                 print(f"Error in visualize_patches: {e}")
 
     def visualize_patches(self):
+        return
         # Get the graph
         ii = self.pg.ii.cpu().numpy()
         jj = self.pg.jj.cpu().numpy()
