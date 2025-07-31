@@ -45,7 +45,7 @@ def voxel_to_img(voxel):
     nogil=True,
     cache=True,
 )
-def to_voxel_grid(voxel, xs, ys, ts, ps, H=480, W=640, nb_of_time_bins=5):
+def _to_voxel_grid(voxel, xs, ys, ts, ps, H=480, W=640, nb_of_time_bins=5):
     duration = ts[-1] - ts[0]
     start_timestamp = ts[0]
 
@@ -102,6 +102,12 @@ def to_voxel_grid(voxel, xs, ys, ts, ps, H=480, W=640, nb_of_time_bins=5):
         voxel[idx + HW + W] += p * v100
         voxel[idx + HW + W + 1] -= p * v000
     return voxel
+
+
+def to_voxel_grid(xs, ys, ts, ps, H=480, W=640, Nbins=5):
+    voxel = np.zeros((Nbins + 1, H, W), dtype=np.float32)
+    _to_voxel_grid(voxel.reshape(-1), xs, ys, ts, ps, H, W, Nbins)
+    return voxel[:-1]
 
 
 @cuda.jit(
