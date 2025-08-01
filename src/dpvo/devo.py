@@ -288,7 +288,7 @@ class DEVO:
         coords = self.reproject(indicies=(ii, jj, kk))
 
         with torch.amp.autocast(
-            "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
         ):
             corr = self.corr(coords, indicies=(kk, jj))
             ctx = self.imap[:, kk % (self.M * self.pmem)]
@@ -394,7 +394,7 @@ class DEVO:
             coords = self.reproject()
 
         with torch.amp.autocast(
-            "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
         ):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
@@ -559,7 +559,7 @@ class DEVO:
 
         with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
             with torch.amp.autocast(
-                "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+                device_type="cuda", enabled=self.cfg.MIXED_PRECISION
             ):
                 fmap, gmap, imap, patches, _, clr = self.network.patchify(
                     image,
