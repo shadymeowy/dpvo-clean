@@ -19,7 +19,7 @@ from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
     compute_remap,
-    to_voxel_grid_cuda,
+    to_voxel_grid,
     voxel_to_img,
 )
 from dpvo.parallel import pgenerator
@@ -96,16 +96,13 @@ def ev_generator(
             ty = (ty * scale).astype(np.int32)
 
         print("event count", idx1 - idx0)
-        # num_events = idx1 - idx0
-        # if num_events < 200_000:
-        #    print(f"Skipping voxel at {t0_ms}-{t1_ms} ms: only {num_events} events")
-        #    continue
+
         rect = rect_map[ty, tx]
         x_rect = np.ascontiguousarray(rect[..., 0])
         y_rect = np.ascontiguousarray(rect[..., 1])
 
         tperf = time.perf_counter()
-        voxel = to_voxel_grid_cuda(x_rect, y_rect, tb, tp, H, W, bins)
+        voxel = to_voxel_grid(x_rect, y_rect, tb, tp, H, W, bins)
         print("to_voxel_grid time", time.perf_counter() - tperf)
 
         yield ((t0_ms + t1_ms) / 2e3, voxel, intrinsics_new)
