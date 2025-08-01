@@ -265,9 +265,7 @@ class DPVO:
         net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         coords = self.reproject(indicies=(ii, jj, kk))
 
-        with torch.amp.autocast(
-            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
-        ):
+        with torch.amp.autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             corr = self.corr(coords, indicies=(kk, jj))
             ctx = self.imap[:, kk % (self.M * self.pmem)]
             net, (delta, weight, _) = self.network.update(
@@ -326,9 +324,8 @@ class DPVO:
             if self.cfg.CLASSIC_LOOP_CLOSURE:
                 self.long_term_lc.keyframe(k)
 
-        to_remove = (
-            self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
-        )  # Remove edges falling outside the optimization window
+        # Remove edges falling outside the optimization window
+        to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
         if self.cfg.LOOP_CLOSURE:
             # ...unless they are being used for loop closure
             lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
@@ -371,9 +368,7 @@ class DPVO:
         with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
 
-        with torch.amp.autocast(
-            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
-        ):
+        with torch.amp.autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):

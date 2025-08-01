@@ -32,19 +32,23 @@ class DVIO:
         show=False,
         enable_timing=False,
         timing_file=None,
+        **kwargs,
     ):
         self.cfg = cfg
-        self.evs = False
-
         self.load_weights(network)
         self.is_initialized = False
-        self.enable_timing = False
+        self.enable_timing = enable_timing
+        self.timing_file = timing_file
+        self.show = show
+        self.concatenated_image = None
 
         self.M = self.cfg.PATCHES_PER_FRAME
         self.N = self.cfg.BUFFER_SIZE
 
         self.ht = ht  # image height
         self.wd = wd  # image width
+
+        self.images = {}
 
         DIM = self.DIM
         RES = self.RES
@@ -56,14 +60,11 @@ class DVIO:
         # keep track of global-BA calls
         self.ran_global_ba = np.zeros(100000, dtype=bool)
 
-        self.flow_data = {}
+        ht = ht // RES
+        wd = wd // RES
 
         # dummy image for visualization
         self.image_ = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
-
-        self.patches_gt_ = torch.zeros(
-            self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
-        )
 
         ### network attributes ###
         if self.cfg.MIXED_PRECISION:
@@ -72,7 +73,7 @@ class DVIO:
             self.kwargs = kwargs = {"device": "cuda", "dtype": torch.float}
 
         ### frame memory size ###
-        self.pmem = self.mem = 36  # 32
+        self.pmem = self.mem = 36  # 32 was too small given default settings
         if self.cfg.LOOP_CLOSURE:
             self.last_global_ba = -1000  # keep track of time since last global opt
             self.pmem = self.cfg.MAX_EDGE_AGE  # patch memory
@@ -80,22 +81,21 @@ class DVIO:
         self.imap_ = torch.zeros(self.pmem, self.M, DIM, **kwargs)
         self.gmap_ = torch.zeros(self.pmem, self.M, 128, self.P, self.P, **kwargs)
 
-        ht = int(ht // RES)
-        wd = int(wd // RES)
+        self.pg = PatchGraph(self.cfg, self.P, self.DIM, self.pmem, **kwargs)
 
-        self.pg = PatchGraph(self.cfg, self.P, DIM, self.pmem, **kwargs)
+        # classic backend
+        if self.cfg.CLASSIC_LOOP_CLOSURE:
+            self.load_long_term_loop_closure()
 
-        self.fmap1_ = torch.zeros(
-            1, self.mem, 128, int(ht // 1), int(wd // 1), **kwargs
-        )
-        self.fmap2_ = torch.zeros(
-            1, self.mem, 128, int(ht // 4), int(wd // 4), **kwargs
-        )
+        self.fmap1_ = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, **kwargs)
+        self.fmap2_ = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, **kwargs)
 
         # feature pyramid
         self.pyramid = (self.fmap1_, self.fmap2_)
 
         self.viewer = None
+        if viz:
+            self.start_viewer()
 
         ### event-based DBA (all times should have been offset by a time offset)
         self.state = MultiSensorState()
@@ -142,8 +142,6 @@ class DVIO:
         self.cur_imu_ii = 0  # The index of the current IMU data being processed
         self.is_init = False  # Is IMU initialized
         self.is_init_VI = False  # Is visual-inertial initialized
-        self.all_gt = None  # All GT data, including timestamps and poses
-        self.all_gt_keys = None  # All GT timestamps
 
         # Whether to perform visual estimation only. When cfg.ENALBE_IMU is False, only visual estimation is performed and visual_only is true. When cfg.ENALBE_IMU is True, visual_only is False.
         self.visual_only = False
@@ -159,6 +157,15 @@ class DVIO:
         self.refTw = np.eye(4, 4)
         self.poses_save = []
         # Record poses
+
+    def load_long_term_loop_closure(self):
+        try:
+            from .loop_closure.long_term import LongTermLoopClosure
+
+            self.long_term_lc = LongTermLoopClosure(self.cfg, self.pg)
+        except ModuleNotFoundError as e:
+            self.cfg.CLASSIC_LOOP_CLOSURE = False
+            print(f"WARNING: {e}")
 
     # Used to set prior_factor_map
     def set_prior(self, t0, t1):
@@ -210,12 +217,17 @@ class DVIO:
         self.network.cuda()
         self.network.eval()
 
-        # if self.cfg.MIXED_PRECISION:
-        #     self.network.half()
+    def start_viewer(self):
+        from dpviewer import Viewer
+
+        intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
+
+        self.viewer = Viewer(
+            self.image_, self.pg.poses_, self.pg.points_, self.pg.colors_, intrinsics_
+        )
 
     @property
     def poses(self):
-        # Use poses for calling, use self.pg.poses_ for writing updates
         return self.pg.poses_.view(1, self.N, 7)
 
     @property
@@ -254,10 +266,6 @@ class DVIO:
     def m(self, val):
         self.pg.m = val
 
-    @property
-    def patches_gt(self):
-        return self.patches_gt_.view(1, self.N * self.M, 3, 3, 3)
-
     def get_pose(self, t):
         if t in self.traj:
             return SE3(self.traj[t])
@@ -277,9 +285,7 @@ class DVIO:
             self.update()
 
         if self.cfg.LOOP_CLOSURE:
-            # 0: #1:
             """ interpolate missing poses """
-            print("keyframes", self.n)
             self.traj = {}
             for i in range(self.n):
                 self.traj[self.pg.tstamps_[i]] = self.pg.poses_[i]
@@ -294,9 +300,10 @@ class DVIO:
         else:
             # Get tstamps and poses from self.poses_save. The first element of each row in self.poses_save is the time, and the other seven are the pose
             poses = np.array(self.poses_save)[:, 1:]
-            tstamps = np.array(self.poses_save, dtype=np.float64)[:, 0]
             # Get timestamps
+            tstamps = np.array(self.poses_save, dtype=np.float64)[:, 0]
 
+        # Poses: x y z qx qy qz qw
         return poses, tstamps
 
     def corr(self, coords, indicies=None):
@@ -374,7 +381,6 @@ class DVIO:
         jj = self.pg.jj[k]
         kk = self.pg.kk[k]
 
-        # flow, _ = pops.flow_mag(SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5)
         flow, _ = pops.flow_mag(
             SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5
         )
@@ -384,8 +390,6 @@ class DVIO:
         i = self.n - self.cfg.KEYFRAME_INDEX - 1  # The 5th to last frame
         j = self.n - self.cfg.KEYFRAME_INDEX + 1  # The 3rd to last frame
         m = self.motionmag(i, j) + self.motionmag(j, i)
-
-        # print(f'the mition between {i} and {j} is {m/2}')
 
         if m / 2 < self.cfg.KEYFRAME_THRESH:
             # If motion is less than the threshold, it is not a keyframe
@@ -411,7 +415,7 @@ class DVIO:
                 self.pg.colors_[i] = self.pg.colors_[i + 1]
                 self.pg.poses_[i] = self.pg.poses_[i + 1]
                 self.pg.patches_[i] = self.pg.patches_[i + 1]
-                self.patches_gt_[i] = self.patches_gt_[i + 1]
+                self.images[i] = self.images[i + 1]
                 self.pg.intrinsics_[i] = self.pg.intrinsics_[i + 1]
 
                 self.imap_[i % self.pmem] = self.imap_[(i + 1) % self.pmem]
@@ -445,8 +449,8 @@ class DVIO:
                 self.long_term_lc.keyframe(k)
 
         # When ii is 22 frames before the current frame, remove it
-        to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
         # Remove edges falling outside the optimization window
+        to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
         if self.cfg.LOOP_CLOSURE:
             # ...unless they are being used for loop closure
             lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
@@ -489,8 +493,8 @@ class DVIO:
             eff_impl=True,
         )
         self.ran_global_ba[self.n] = True
-        # Mark that the current frame has run global BA optimization
 
+        # Mark that the current frame has run global BA optimization
         self.last_t0 = t0
         self.last_t1 = self.n
 
@@ -777,16 +781,17 @@ class DVIO:
         del bafactor  # Release memory
 
     def update(self):
-        coords = self.reproject()
-        # Perform reprojection
+        with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
+            coords = self.reproject()
 
-        with torch.amp.autocast("cuda", enabled=True):
-            corr = self.corr(coords)
-            # Calculate correlation, get feature matching information between the current frame and the previous frame.
-            ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
-            self.pg.net, (delta, weight, _) = self.network.update(
-                self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
-            )
+        with torch.amp.autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+            with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
+                corr = self.corr(coords)
+            with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
+                ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
+                self.pg.net, (delta, weight, _) = self.network.update(
+                    self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
+                )
 
         lmbda = torch.as_tensor([1e-4], device="cuda")
         weight = weight.float()
@@ -796,7 +801,7 @@ class DVIO:
         self.pg.weight = weight
 
         # Perform BA optimization
-        with Timer("BA", enabled=self.enable_timing):
+        with Timer("ba", enabled=self.enable_timing, file=self.timing_file):
             try:
                 if self.imu_enabled:
                     # If using imu
@@ -888,8 +893,8 @@ class DVIO:
                         self.last_t0 = t0
                         self.last_t1 = self.n
 
-            except Exception as e:
-                print("Warning BA failed...", e)
+            except Exception as _:
+                print("Warning BA failed...")
 
             # Update point cloud
             points = pops.point_cloud(
@@ -920,11 +925,6 @@ class DVIO:
             "n": self.n,
         }
 
-        # import matplotlib.pyplot as plt
-        # plt.figure()
-        # plt.imshow(self.image_)
-        # plt.show()
-
     def __edges_all(self):
         return flatmeshgrid(
             torch.arange(0, self.m, device="cuda"),
@@ -933,7 +933,8 @@ class DVIO:
         )
 
     def __edges_forw(self):
-        r = self.cfg.PATCH_LIFETIME  # default: 13
+        # default: 13
+        r = self.cfg.PATCH_LIFETIME
         t0 = self.M * max((self.n - r), 0)
         t1 = self.M * max((self.n - 1), 0)
         return flatmeshgrid(
@@ -943,7 +944,8 @@ class DVIO:
         )
 
     def __edges_back(self):
-        r = self.cfg.PATCH_LIFETIME  # default: 13
+        # default: 13
+        r = self.cfg.PATCH_LIFETIME
         t0 = self.M * max((self.n - 1), 0)
         t1 = self.M * max((self.n - 0), 0)
         return flatmeshgrid(
@@ -1046,10 +1048,6 @@ class DVIO:
         # initialization complete Mark initialization as successful
         # Flag for completion of initialization
         self.is_initialized = True
-
-    def get_pose_ref(self, tt: float):
-        tt_found = self.all_gt_keys[bisect.bisect(self.all_gt_keys, tt)]
-        return tt_found, self.all_gt[tt_found]
 
     def VisualIMUAlignment(self, t0, t1, ignore_lever, disable_scale=False):
         poses = SE3(self.pg.poses_)
@@ -1255,16 +1253,6 @@ class DVIO:
         # ppp = np.matmul(R0, wTbs[t1 - 1, 0:3, 3])
         # RRR = np.matmul(R0, wTbs[t1 - 1, 0:3, 0:3])
 
-        if self.all_gt is not None:
-            # align the initial poses for visualization
-            tt_found, dd = self.get_pose_ref(
-                self.tlist[self.pg.tstamps_[t1 - 1]] - 1e-3
-            )
-            self.refTw = np.matmul(dd["T"], np.linalg.inv(wTbs[t1 - 1]))
-            self.refTw[0:3, 0:3] = trans.att2m(
-                [0, 0, trans.m2att(self.refTw[0:3, 0:3])[2]]
-            )
-
         g = np.matmul(R0, g0)
         for i in range(0, t1):
             wTbs[i, 0:3, 3] = np.matmul(R0, wTbs[i, 0:3, 3])
@@ -1289,7 +1277,6 @@ class DVIO:
             self.pg.poses_[i] = torch.cat([t, q])
             # self.disps[i] /= s
             # Rewrite the depth of all patches
-            self.patches_gt_[i, :, 2] /= s
             self.pg.patches_[i, :, 2] /= s
 
         # For all non-keyframe poses
@@ -1326,13 +1313,6 @@ class DVIO:
                 )[0:3, 3]
                 self.plt_pos[0].append(ppp[0])
                 self.plt_pos[1].append(ppp[1])
-                if self.all_gt is not None:
-                    # If there is gt data, it will be used here!
-                    tt_found, dd = self.get_pose_ref(
-                        self.tlist[self.pg.tstamps_[i]] - 1e-3
-                    )
-                    self.plt_pos_ref[0].append(dd["T"][0, 3])
-                    self.plt_pos_ref[1].append(dd["T"][1, 3])
 
             if not self.visual_only:
                 # If there is an IMU
@@ -1381,12 +1361,6 @@ class DVIO:
                 qqq = Rotation.from_matrix(TTTref[:3, :3]).as_quat()
                 self.plt_pos[0].append(ppp[0])
                 self.plt_pos[1].append(ppp[1])
-                if self.all_gt is not None:
-                    tt_found, dd = self.get_pose_ref(
-                        self.tlist[self.pg.tstamps_[i]] - 1e-3
-                    )
-                    self.plt_pos_ref[0].append(dd["T"][0, 3])
-                    self.plt_pos_ref[1].append(dd["T"][1, 3])
 
             for itr in range(1):
                 self.update()
@@ -1492,7 +1466,10 @@ class DVIO:
         # End of processing the current frame
 
     def __call__(self, tstamp, image, intrinsics, scale=1.0):
-        """track new voxel frame"""
+        """track new frame"""
+
+        # Create a copy of the current frame
+        current_frame = image.clone()
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             # If classic loop closure (i.e., image matching) is enabled
@@ -1504,105 +1481,24 @@ class DVIO:
             )
 
         if self.viewer is not None:
-            self.viewer.update_image(image)
+            self.viewer.update_image(image.contiguous())
 
         # if self.viz_flow:
         #     self.image_ = image.detach().cpu().permute((1, 2, 0)).numpy()
 
-        if not self.evs:
-            # If not using events, it's a normal image normalization operation
-            image = 2 * (image[None, None] / 255.0) - 0.5
-        else:
-            image = image[None, None]
+        image = 2 * (image[None, None] / 255.0) - 0.5
 
-            if self.n == 0:
-                nonzero_ev = image != 0.0
-                zero_ev = ~nonzero_ev
-                num_nonzeros = nonzero_ev.sum().item()
-                num_zeros = zero_ev.sum().item()
-                # [DEBUG]
-                # print("nonzero-zero-ratio", num_nonzeros, num_zeros, num_nonzeros / (num_zeros + num_nonzeros))
-                if num_nonzeros / (num_zeros + num_nonzeros) < 2e-2:
-                    # TODO eval hyperparam (add to config.py)
-                    print(f"skip voxel at {tstamp} due to lack of events!")
-                    return
-
-            b, n, v, h, w = image.shape
-            flatten_image = image.view(b, n, -1)
-
-            if self.cfg.NORM.lower() == "none":
-                pass
-            elif self.cfg.NORM.lower() == "rescale" or self.cfg.NORM.lower() == "norm":
-                # Normalize (rescaling) neg events into [-1,0) and pos events into (0,1] sequence-wise
-                # Preserve pos-neg inequality (quantity only)
-                pos = flatten_image > 0.0
-                neg = flatten_image < 0.0
-                vx_max = (
-                    torch.Tensor([1]).to("cuda")
-                    if pos.sum().item() == 0
-                    else flatten_image[pos].max(dim=-1, keepdim=True)[0]
+        # TODO patches with depth is available
+        with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
+            with torch.amp.autocast(
+                device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+            ):
+                fmap, gmap, imap, patches, _, clr = self.network.patchify(
+                    image,
+                    patches_per_image=self.cfg.PATCHES_PER_FRAME,
+                    centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
+                    return_color=True,
                 )
-                vx_min = (
-                    torch.Tensor([1]).to("cuda")
-                    if neg.sum().item() == 0
-                    else flatten_image[neg].min(dim=-1, keepdim=True)[0]
-                )
-                # [DEBUG]
-                # print("vx_max", vx_max.item())
-                # print("vx_min", vx_min.item())
-                if vx_min.item() == 0.0 or vx_max.item() == 0.0:
-                    # no information for at least one polarity
-                    print(f"empty voxel at {tstamp}!")
-                    return
-                flatten_image[pos] = flatten_image[pos] / vx_max
-                flatten_image[neg] = flatten_image[neg] / -vx_min
-            elif self.cfg.NORM.lower() == "standard" or self.cfg.NORM.lower() == "std":
-                # Data standardization of events only
-                # Does not preserve pos-neg inequality
-                # see https://github.com/uzh-rpg/rpg_e2depth/blob/master/utils/event_tensor_utils.py#L52
-                nonzero_ev = flatten_image != 0.0
-                num_nonzeros = nonzero_ev.sum(dim=-1)
-                if torch.all(num_nonzeros > 0):
-                    # compute mean and stddev of the **nonzero** elements of the event tensor
-                    # we do not use PyTorch's default mean() and std() functions since it's faster
-                    # to compute it by hand than applying those funcs to a masked array
-
-                    mean = (
-                        torch.sum(flatten_image, dim=-1, dtype=torch.float32)
-                        / num_nonzeros
-                    )
-                    # force torch.float32 to prevent overflows when using 16-bit precision
-                    stddev = torch.sqrt(
-                        torch.sum(flatten_image**2, dim=-1, dtype=torch.float32)
-                        / num_nonzeros
-                        - mean**2
-                    )
-                    mask = nonzero_ev.type_as(flatten_image)
-                    flatten_image = (
-                        mask * (flatten_image - mean[..., None]) / stddev[..., None]
-                    )
-            else:
-                print(f"{self.cfg.NORM} not implemented")
-                raise NotImplementedError
-
-            image = flatten_image.view(b, n, v, h, w)
-
-        if image.shape[-1] == 346:
-            image = image[..., 1:-1]
-            # hack for MVSEC, FPV,...
-
-        # TODO patches with depth is available (val)
-        with torch.amp.autocast(
-            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
-        ):
-            fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                image,
-                patches_per_image=self.cfg.PATCHES_PER_FRAME,
-                centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
-                return_color=True,
-            )
-
-        self.patches_gt_[self.n] = patches.clone()
 
         ### update state attributes ###
         self.tlist.append(tstamp)
@@ -1612,12 +1508,8 @@ class DVIO:
         self.pg.intrinsics_[self.n] = intrinsics / self.RES
 
         # color info for visualization
-        if not self.evs:
-            clr = (clr[0, :, [2, 1, 0]] + 0.5) * (255.0 / 2)
-            self.pg.colors_[self.n] = clr.to(torch.uint8)
-        else:
-            clr = (clr[0, :, [0, 0, 0]] + 0.5) * (255.0 / 2)
-            self.pg.colors_[self.n] = clr.to(torch.uint8)
+        clr = (clr[0, :, [2, 1, 0]] + 0.5) * (255.0 / 2)
+        self.pg.colors_[self.n] = clr.to(torch.uint8)
 
         self.pg.index_[self.n + 1] = self.n + 1
         self.pg.index_map_[self.n + 1] = self.m + self.M
@@ -1645,6 +1537,7 @@ class DVIO:
             patches[:, :, 2] = s
 
         self.pg.patches_[self.n] = patches
+        self.images[self.n] = current_frame.cpu().numpy().transpose(1, 2, 0)
 
         ### update network attributes ###
         self.imap_[self.n % self.pmem] = imap.squeeze()
