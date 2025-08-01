@@ -13,8 +13,6 @@ from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import Timer, flatmeshgrid
 
-
-autocast = torch.amp.autocast
 Id = SE3.Identity(1, device="cuda")
 
 
@@ -267,7 +265,9 @@ class DPVO:
         net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         coords = self.reproject(indicies=(ii, jj, kk))
 
-        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+        with torch.amp.autocast(
+            "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+        ):
             corr = self.corr(coords, indicies=(kk, jj))
             ctx = self.imap[:, kk % (self.M * self.pmem)]
             net, (delta, weight, _) = self.network.update(
@@ -371,7 +371,9 @@ class DPVO:
         with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
 
-        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+        with torch.amp.autocast(
+            "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+        ):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
@@ -469,7 +471,9 @@ class DPVO:
         image = 2 * (image[None, None] / 255.0) - 0.5
 
         with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
-            with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+            with torch.amp.autocast(
+                "cuda", device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+            ):
                 fmap, gmap, imap, patches, _, clr = self.network.patchify(
                     image,
                     patches_per_image=self.cfg.PATCHES_PER_FRAME,
