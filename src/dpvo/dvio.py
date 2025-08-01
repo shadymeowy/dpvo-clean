@@ -14,14 +14,14 @@ from . import geo as trans
 from . import projective_ops as pops
 from .lietorch import SE3
 from .multi_sensor import MultiSensorState
-from .net import eVONet
+from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import Timer, flatmeshgrid
 
 Id = SE3.Identity(1, device="cuda")
 
 
-class DEIO:
+class DVIO:
     def __init__(
         self,
         cfg,
@@ -32,18 +32,10 @@ class DEIO:
         show=False,
         enable_timing=False,
         timing_file=None,
-        dim_inet=384,
-        dim_fnet=128,
-        dim=32,
     ):
         self.cfg = cfg
-        self.evs = True
+        self.evs = False
 
-        self.dim_inet = dim_inet
-        self.dim_fnet = dim_fnet
-        self.dim = dim
-
-        self.args = cfg
         self.load_weights(network)
         self.is_initialized = False
         self.enable_timing = False
@@ -54,6 +46,7 @@ class DEIO:
         self.ht = ht  # image height
         self.wd = wd  # image width
 
+        DIM = self.DIM
         RES = self.RES
 
         ### state attributes ###
@@ -84,21 +77,19 @@ class DEIO:
             self.last_global_ba = -1000  # keep track of time since last global opt
             self.pmem = self.cfg.MAX_EDGE_AGE  # patch memory
 
-        self.imap_ = torch.zeros(self.pmem, self.M, self.dim_inet, **kwargs)
-        self.gmap_ = torch.zeros(
-            self.pmem, self.M, self.dim_fnet, self.P, self.P, **kwargs
-        )
+        self.imap_ = torch.zeros(self.pmem, self.M, DIM, **kwargs)
+        self.gmap_ = torch.zeros(self.pmem, self.M, 128, self.P, self.P, **kwargs)
 
         ht = int(ht // RES)
         wd = int(wd // RES)
 
-        self.pg = PatchGraph(self.cfg, self.P, self.dim_inet, self.pmem, **kwargs)
+        self.pg = PatchGraph(self.cfg, self.P, DIM, self.pmem, **kwargs)
 
         self.fmap1_ = torch.zeros(
-            1, self.mem, self.dim_fnet, int(ht // 1), int(wd // 1), **kwargs
+            1, self.mem, 128, int(ht // 1), int(wd // 1), **kwargs
         )
         self.fmap2_ = torch.zeros(
-            1, self.mem, self.dim_fnet, int(ht // 4), int(wd // 4), **kwargs
+            1, self.mem, 128, int(ht // 4), int(wd // 4), **kwargs
         )
 
         # feature pyramid
@@ -197,34 +188,22 @@ class DEIO:
     def load_weights(self, network):
         # load network from checkpoint file
         if isinstance(network, str):
-            print(f"Loading from {network}")
-            checkpoint = torch.load(network)
-            # TODO infer dim_inet=self.dim_inet, dim_fnet=self.dim_fnet, dim=self.dim
-            self.network = eVONet(
-                dim_inet=self.dim_inet,
-                dim_fnet=self.dim_fnet,
-                dim=self.dim,
-                patch_selector=self.cfg.PATCH_SELECTOR,
-            )
-            if "model_state_dict" in checkpoint:
-                self.network.load_state_dict(checkpoint["model_state_dict"])
-            else:
-                # legacy
-                from collections import OrderedDict
+            from collections import OrderedDict
 
-                new_state_dict = OrderedDict()
-                for k, v in checkpoint.items():
-                    if "update.lmbda" not in k:
-                        new_state_dict[k.replace("module.", "")] = v
-                self.network.load_state_dict(new_state_dict)
+            state_dict = torch.load(network)
+            new_state_dict = OrderedDict()
+            for k, v in state_dict.items():
+                if "update.lmbda" not in k:
+                    new_state_dict[k.replace("module.", "")] = v
+
+            self.network = VONet()
+            self.network.load_state_dict(new_state_dict)
 
         else:
             self.network = network
 
         # steal network attributes
-        self.dim_inet = self.network.dim_inet
-        self.dim_fnet = self.network.dim_fnet
-        self.dim = self.network.dim
+        self.DIM = self.network.DIM
         self.RES = self.network.RES
         self.P = self.network.P
 
@@ -253,11 +232,11 @@ class DEIO:
 
     @property
     def imap(self):
-        return self.imap_.view(1, self.pmem * self.M, self.dim_inet)
+        return self.imap_.view(1, self.pmem * self.M, self.DIM)
 
     @property
     def gmap(self):
-        return self.gmap_.view(1, self.pmem * self.M, self.dim_fnet, 3, 3)
+        return self.gmap_.view(1, self.pmem * self.M, 128, 3, 3)
 
     @property
     def n(self):
@@ -346,7 +325,7 @@ class DEIO:
         self.pg.ii = torch.cat([self.pg.ii, self.ix[ii]])
         # self.ix[ii], which is self.ix[kk], is the index of ii
 
-        net = torch.zeros(1, len(ii), self.dim_inet, **self.kwargs)
+        net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         self.pg.net = torch.cat([self.pg.net, net], dim=1)
 
     def remove_factors(self, m, store: bool):
@@ -377,7 +356,7 @@ class DEIO:
         jj = self.n * torch.ones_like(kk)
         ii = self.ix[kk]
 
-        net = torch.zeros(1, len(ii), self.dim_inet, **self.kwargs)
+        net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         coords = self.reproject(indicies=(ii, jj, kk))
 
         with torch.amp.autocast("cuda", enabled=self.cfg.MIXED_PRECISION):
@@ -1613,13 +1592,14 @@ class DEIO:
             # hack for MVSEC, FPV,...
 
         # TODO patches with depth is available (val)
-        with torch.amp.autocast("cuda", enabled=self.cfg.MIXED_PRECISION):
+        with torch.amp.autocast(
+            device_type="cuda", enabled=self.cfg.MIXED_PRECISION
+        ):
             fmap, gmap, imap, patches, _, clr = self.network.patchify(
                 image,
                 patches_per_image=self.cfg.PATCHES_PER_FRAME,
+                centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
                 return_color=True,
-                scorer_eval_mode=self.cfg.SCORER_EVAL_MODE,
-                scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID,
             )
 
         self.patches_gt_[self.n] = patches.clone()
