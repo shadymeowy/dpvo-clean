@@ -113,7 +113,7 @@ class DEVO:
         # load network from checkpoint file
         if isinstance(network, str):
             print(f"Loading from {network}")
-            checkpoint = torch.load(network)
+            checkpoint = torch.load(network, weights_only=False)
             self.network = eVONet(
                 patch_selector=self.cfg.PATCH_SELECTOR,
             )
