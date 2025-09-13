@@ -5,19 +5,28 @@ import numpy as np
 from numba import cuda, jit
 
 
-def compute_remap(K, distortion, W, H):
+def compute_remap(K, distortion, W, H, fisheye=False):
     K, _ = cv2.getOptimalNewCameraMatrix(
         K, distortion, (W, H), alpha=0, newImgSize=(W, H)
     )
-    coords = (
-        np.stack(np.meshgrid(np.arange(W), np.arange(H)))
-        .reshape((2, -1))
-        .astype("float32")
-    )
-    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
-    points = cv2.undistortPointsIter(
-        coords, K, distortion, np.eye(3), K, criteria=term_criteria
-    )
+    if fisheye:
+        coords = (
+            np.stack(np.meshgrid(np.arange(W), np.arange(H)), axis=-1)
+            .reshape(-1, 2)
+            .astype("float32")
+        )
+        coords = coords.reshape(-1, 1, 2)
+        points = cv2.fisheye.undistortPoints(coords, K, distortion, P=K)
+    else:
+        coords = (
+            np.stack(np.meshgrid(np.arange(W), np.arange(H)))
+            .reshape((2, -1))
+            .astype("float32")
+        )
+        term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+        points = cv2.undistortPointsIter(
+            coords, K, distortion, np.eye(3), K, criteria=term_criteria
+        )
     rectify_map = points.reshape((H, W, 2))
     # Make out of bounds points to be -1, -1
     mask = (
