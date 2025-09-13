@@ -183,6 +183,30 @@ def transform(
     return x1
 
 
+def transform_s(
+    source_poses,
+    target_poses,
+    patches,
+    source_intrinsics,
+    target_intrinsics,
+    ii,
+    jj,
+    kk,
+):
+    """projective transform"""
+    # backproject
+    X0 = iproj(patches[:, kk], source_intrinsics[:, ii])
+
+    # transform
+    Gij = target_poses[:, jj] * source_poses[:, ii].inv()
+    X1 = Gij[:, :, None, None] * X0
+
+    # project
+    x1 = proj(X1, target_intrinsics[:, jj], depth=False)
+
+    return x1
+
+
 def point_cloud(poses, patches, intrinsics, ix):
     """generate point cloud from patches"""
     return poses[:, ix, None, None].inv() * iproj(patches, intrinsics[:, ix])

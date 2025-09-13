@@ -30,7 +30,6 @@ class DEVO:
         show=False,
         enable_timing=False,
         timing_file=None,
-        **kwargs,
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -92,9 +91,19 @@ class DEVO:
         self.fmap2_ = torch.zeros(
             1, self.mem, 128, int(ht // 4), int(wd // 4), **kwargs
         )
+        self.fmap1_s_ = torch.zeros(
+            1, self.mem, 128, int(ht // 1), int(wd // 1), **kwargs
+        )
+        self.fmap2_s_ = torch.zeros(
+            1, self.mem, 128, int(ht // 4), int(wd // 4), **kwargs
+        )
 
         # feature pyramid
         self.pyramid = (self.fmap1_, self.fmap2_)
+        self.pyramid_s = (self.fmap1_s_, self.fmap2_s_)
+
+        extrinsics = torch.from_numpy(extrinsics).cuda()
+        self.extrinsics = extrinsics.view(1, 7).float()
 
         self.viewer = None
         if viz:
@@ -159,6 +168,10 @@ class DEVO:
 
     @property
     def intrinsics(self):
+        return self.pg.intrinsics_.view(1, self.N, 4)
+
+    @property
+    def intrinsics_s(self):
         return self.pg.intrinsics_.view(1, self.N, 4)
 
     @property
@@ -242,6 +255,15 @@ class DEVO:
         corr2 = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
         return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
 
+    def corr_s(self, coords, indicies=None):
+        """local correlation volume"""
+        ii, jj = indicies if indicies is not None else (self.pg.kk, self.pg.jj)
+        ii1 = ii % (self.M * self.pmem)
+        jj1 = jj % (self.mem)
+        corr1 = altcorr.corr(self.gmap, self.pyramid_s[0], coords / 1, ii1, jj1, 3)
+        corr2 = altcorr.corr(self.gmap, self.pyramid_s[1], coords / 4, ii1, jj1, 3)
+        return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
+
     def reproject(self, indicies=None):
         """reproject patch k from i -> j"""
         (ii, jj, kk) = (
@@ -252,6 +274,27 @@ class DEVO:
         )
         return coords.permute(0, 1, 4, 2, 3).contiguous()
 
+    def reproject_s(self, indicies=None):
+        """reproject patch k from i -> j"""
+        (ii, jj, kk) = (
+            indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
+        )
+
+        left_to_right = SE3(self.extrinsics.unsqueeze(1))
+        poses_right = left_to_right * SE3(self.poses)
+
+        coords = pops.transform_s(
+            source_poses=SE3(self.poses),
+            target_poses=poses_right,
+            patches=self.patches,
+            source_intrinsics=self.intrinsics,
+            target_intrinsics=self.intrinsics_s,
+            ii=ii,
+            jj=jj,
+            kk=kk,
+        )
+        return coords.permute(0, 1, 4, 2, 3).contiguous()
+
     def append_factors(self, ii, jj):
         self.pg.jj = torch.cat([self.pg.jj, jj])
         self.pg.kk = torch.cat([self.pg.kk, ii])
@@ -259,6 +302,7 @@ class DEVO:
 
         net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         self.pg.net = torch.cat([self.pg.net, net], dim=1)
+        self.pg.net_s = torch.cat([self.pg.net_s, net], dim=1)
 
     def remove_factors(self, m, store: bool):
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
@@ -275,10 +319,14 @@ class DEVO:
         self.pg.weight = self.pg.weight[:, ~m]
         self.pg.target = self.pg.target[:, ~m]
 
+        self.pg.weight_s = self.pg.weight_s[:, ~m]
+        self.pg.target_s = self.pg.target_s[:, ~m]
+
         self.pg.ii = self.pg.ii[~m]
         self.pg.jj = self.pg.jj[~m]
         self.pg.kk = self.pg.kk[~m]
         self.pg.net = self.pg.net[:, ~m]
+        self.pg.net_s = self.pg.net_s[:, ~m]
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
 
     def motion_probe(self):
@@ -343,6 +391,11 @@ class DEVO:
                 self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
                 self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
 
+                self.pg.intrinsics_s_[i] = self.pg.intrinsics_s_[i + 1]
+
+                self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[0, (i + 1) % self.mem]
+                self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[0, (i + 1) % self.mem]
+
             self.n -= 1
             self.m -= self.M
 
@@ -393,22 +446,34 @@ class DEVO:
     def update(self):
         with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
+            coords_s = self.reproject_s()
 
         with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
+                corr_s = self.corr_s(coords_s)
+
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
+
                 self.pg.net, (delta, weight, _) = self.network.update(
                     self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
                 )
+                self.pg.net_s, (delta_s, weight_s, _) = self.network.update(
+                    self.pg.net_s, ctx, corr_s, None, self.pg.ii, self.pg.jj, self.pg.kk
+                )
 
-        lmbda = torch.as_tensor([1e-4], device="cuda")
-        weight = weight.float()
-        target = coords[..., self.P // 2, self.P // 2] + delta.float()
+            lmbda = torch.as_tensor([1e-4], device="cuda")
+            weight = weight.float()
+            target = coords[..., self.P // 2, self.P // 2] + delta.float()
+
+            weight_s = weight_s.float()
+            target_s = coords_s[..., self.P // 2, self.P // 2] + delta_s.float()
 
         self.pg.target = target
         self.pg.weight = weight
+        self.pg.target_s = target_s
+        self.pg.weight_s = weight_s
 
         with Timer("ba", enabled=self.enable_timing, file=self.timing_file):
             try:
@@ -428,8 +493,12 @@ class DEVO:
                         self.poses,
                         self.patches,
                         self.intrinsics,
+                        self.intrinsics_s,
+                        self.extrinsics,
                         target,
                         weight,
+                        target_s,
+                        weight_s,
                         lmbda,
                         self.pg.ii,
                         self.pg.jj,
@@ -439,6 +508,7 @@ class DEVO:
                         M=self.M,
                         iterations=2,
                         eff_impl=False,
+                        stereo=True,
                     )
             except Exception as _:
                 print("Warning BA failed...")
@@ -472,14 +542,82 @@ class DEVO:
             indexing="ij",
         )
 
-    def __call__(self, tstamp, image, intrinsics, scale=1.0):
+    def norm_events(self, image):
+        if self.n == 0:
+            nonzero_ev = image != 0.0
+            zero_ev = ~nonzero_ev
+            num_nonzeros = nonzero_ev.sum().item()
+            num_zeros = zero_ev.sum().item()
+
+            if (
+                num_nonzeros / (num_zeros + num_nonzeros) < 2e-2
+            ):  # TODO eval hyperparam (add to config.py)
+                print("skip voxel at due to lack of events!")
+                return None
+
+        b, n, v, h, w = image.shape
+        flatten_image = image.view(b, n, -1)
+
+        if self.cfg.NORM.lower() == "none":
+            pass
+        elif self.cfg.NORM.lower() == "rescale" or self.cfg.NORM.lower() == "norm":
+            pos = flatten_image > 0.0
+            neg = flatten_image < 0.0
+            vx_max = (
+                torch.Tensor([1]).to("cuda")
+                if pos.sum().item() == 0
+                else flatten_image[pos].max(dim=-1, keepdim=True)[0]
+            )
+            vx_min = (
+                torch.Tensor([1]).to("cuda")
+                if neg.sum().item() == 0
+                else flatten_image[neg].min(dim=-1, keepdim=True)[0]
+            )
+
+            if vx_min.item() == 0.0 or vx_max.item() == 0.0:
+                print("empty voxel at!")
+                return None
+
+            flatten_image[pos] = flatten_image[pos] / vx_max
+            flatten_image[neg] = flatten_image[neg] / -vx_min
+        elif self.cfg.NORM.lower() == "standard" or self.cfg.NORM.lower() == "std":
+            nonzero_ev = flatten_image != 0.0
+            num_nonzeros = nonzero_ev.sum(dim=-1)
+            if torch.all(num_nonzeros > 0):
+                mean = (
+                    torch.sum(flatten_image, dim=-1, dtype=torch.float32) / num_nonzeros
+                )  # force torch.float32 to prevent overflows when using 16-bit precision
+                stddev = torch.sqrt(
+                    torch.sum(flatten_image**2, dim=-1, dtype=torch.float32)
+                    / num_nonzeros
+                    - mean**2
+                )
+                mask = nonzero_ev.type_as(flatten_image)
+                flatten_image = (
+                    mask * (flatten_image - mean[..., None]) / stddev[..., None]
+                )
+        else:
+            print(f"{self.cfg.NORM} not implemented")
+            raise NotImplementedError
+
+        image = flatten_image.view(b, n, v, h, w)
+
+        if image.shape[-1] == 346:
+            image = image[..., 1:-1]  # hack for MVSEC, FPV,...
+
+        return image
+
+    def __call__(self, tstamp, images, intrinsics, scale=1.0):
         """track new frame"""
 
         # Create a copy of the current frame
-        current_frame = image.clone()
+        image_p = images[0]
+        image_s = images[1]
+
+        current_frame = image_p.clone()
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:
-            self.long_term_lc(image, self.n)
+            self.long_term_lc(image_p, self.n)
 
         if (self.n + 1) >= self.N:
             raise Exception(
@@ -487,89 +625,38 @@ class DEVO:
             )
 
         if self.viewer is not None:
-            self.viewer.update_image(image.contiguous())
+            self.viewer.update_image(image_p.contiguous())
 
         if False:
-            image = 2 * (image[None, None] / 255.0) - 0.5
+            image_p = 2 * (image_p[None, None] / 255.0) - 0.5
         else:
-            image = image[None, None]
+            image_p = image_p[None, None]
+            image_s = image_s[None, None]
 
-            if self.n == 0:
-                nonzero_ev = image != 0.0
-                zero_ev = ~nonzero_ev
-                num_nonzeros = nonzero_ev.sum().item()
-                num_zeros = zero_ev.sum().item()
-
-                if (
-                    num_nonzeros / (num_zeros + num_nonzeros) < 2e-2
-                ):  # TODO eval hyperparam (add to config.py)
-                    print(f"skip voxel at {tstamp} due to lack of events!")
-                    return
-
-            b, n, v, h, w = image.shape
-            flatten_image = image.view(b, n, -1)
-
-            if self.cfg.NORM.lower() == "none":
-                pass
-            elif self.cfg.NORM.lower() == "rescale" or self.cfg.NORM.lower() == "norm":
-                pos = flatten_image > 0.0
-                neg = flatten_image < 0.0
-                vx_max = (
-                    torch.Tensor([1]).to("cuda")
-                    if pos.sum().item() == 0
-                    else flatten_image[pos].max(dim=-1, keepdim=True)[0]
-                )
-                vx_min = (
-                    torch.Tensor([1]).to("cuda")
-                    if neg.sum().item() == 0
-                    else flatten_image[neg].min(dim=-1, keepdim=True)[0]
-                )
-
-                if vx_min.item() == 0.0 or vx_max.item() == 0.0:
-                    print(f"empty voxel at {tstamp}!")
-                    return
-                flatten_image[pos] = flatten_image[pos] / vx_max
-                flatten_image[neg] = flatten_image[neg] / -vx_min
-            elif self.cfg.NORM.lower() == "standard" or self.cfg.NORM.lower() == "std":
-                nonzero_ev = flatten_image != 0.0
-                num_nonzeros = nonzero_ev.sum(dim=-1)
-                if torch.all(num_nonzeros > 0):
-                    mean = (
-                        torch.sum(flatten_image, dim=-1, dtype=torch.float32)
-                        / num_nonzeros
-                    )  # force torch.float32 to prevent overflows when using 16-bit precision
-                    stddev = torch.sqrt(
-                        torch.sum(flatten_image**2, dim=-1, dtype=torch.float32)
-                        / num_nonzeros
-                        - mean**2
-                    )
-                    mask = nonzero_ev.type_as(flatten_image)
-                    flatten_image = (
-                        mask * (flatten_image - mean[..., None]) / stddev[..., None]
-                    )
-            else:
-                print(f"{self.cfg.NORM} not implemented")
-                raise NotImplementedError
-
-            image = flatten_image.view(b, n, v, h, w)
-
-        if image.shape[-1] == 346:
-            image = image[..., 1:-1]  # hack for MVSEC, FPV,...
+            image_p = self.norm_events(image_p)
+            if image_p is None:
+                return
+            image_s = self.norm_events(image_s)
+            if image_s is None:
+                return
 
         with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
             with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
                 fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                    image,
+                    image_p,
                     patches_per_image=self.cfg.PATCHES_PER_FRAME,
                     return_color=True,
                     scorer_eval_mode=self.cfg.SCORER_EVAL_MODE,
                     scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID,
                 )
 
+            fmap_s = self.network.patchify.fnet(image_s) / 4.0
+
         ### update state attributes ###
         self.tlist.append(tstamp)
         self.pg.tstamps_[self.n] = self.counter
-        self.pg.intrinsics_[self.n] = intrinsics / self.RES
+        self.pg.intrinsics_[self.n] = intrinsics[0] / self.RES
+        self.pg.intrinsics_s_[self.n] = intrinsics[1] / self.RES
 
         # color info for visualization
         clr = (clr[0, :, [0, 0, 0]] + 0.5) * (255.0 / 2)
@@ -604,6 +691,8 @@ class DEVO:
         self.gmap_[self.n % self.pmem] = gmap.squeeze()
         self.fmap1_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 1, 1)
         self.fmap2_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 4, 4)
+        self.fmap1_s_[:, self.n % self.mem] = F.avg_pool2d(fmap_s[0], 1, 1)
+        self.fmap2_s_[:, self.n % self.mem] = F.avg_pool2d(fmap_s[0], 4, 4)
 
         self.counter += 1
         if self.n > 0 and not self.is_initialized:
@@ -648,6 +737,7 @@ class DEVO:
                 print(f"Error in visualize_patches: {e}")
 
     def visualize_patches(self):
+        return
         # Get the graph
         ii = self.pg.ii.cpu().numpy()
         jj = self.pg.jj.cpu().numpy()

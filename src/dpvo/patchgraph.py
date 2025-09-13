@@ -28,7 +28,11 @@ class PatchGraph:
         self.patches_ = torch.zeros(
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
         )
+        self.patches_s_ = torch.zeros(
+            self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
+        )
         self.intrinsics_ = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
+        self.intrinsics_s_ = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
 
         self.points_ = torch.zeros(self.N * self.M, 3, dtype=torch.float, device="cuda")
         self.colors_ = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device="cuda")
@@ -44,6 +48,7 @@ class PatchGraph:
 
         ### edge information ###
         self.net = torch.zeros(1, 0, DIM, **kwargs)
+        self.net_s = torch.zeros(1, 0, DIM, **kwargs)
         self.ii = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk = torch.as_tensor([], dtype=torch.long, device="cuda")
@@ -134,6 +139,10 @@ class PatchGraph:
     @property
     def patches(self):
         return self.patches_.view(1, self.N * self.M, 3, 3, 3)
+
+    @property
+    def patches_s(self):
+        return self.patches_s_.view(1, self.N * self.M, 3, 3, 3)
 
     @property
     def intrinsics(self):

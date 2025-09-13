@@ -13,6 +13,7 @@ from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
+from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
 from dpvo.config import cfg
@@ -83,6 +84,8 @@ def ev_generator(
     print("duration", duration)
     print("number of events", len(t))
 
+    voxel = np.zeros((bins + 1, H, W), dtype=np.float32)
+
     for idx in tqdm(range(N1, N2, stride)):
         tperf = time.perf_counter()
         t0_ms = period * idx
@@ -112,10 +115,26 @@ def ev_generator(
         y_rect = np.ascontiguousarray(rect[..., 1])
 
         tperf = time.perf_counter()
+
         voxel = to_voxel_grid_cuda(x_rect, y_rect, tb, tp, H, W, bins)
         print("to_voxel_grid time", time.perf_counter() - tperf)
 
         yield ((t0_ms + t1_ms) / 2e3, voxel, intrinsics_new)
+
+
+def read_extrinsic(path, camera_name, camera2_name):
+    with h5py.File(path, "r") as h5:
+        T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
+        T_camera2 = h5[f"{camera2_name}/calib/T_to_prophesee_left"][()]
+
+    # T_camera2_to_camera = np.linalg.inv(T_camera2) @ T_camera
+    T_camera2_to_camera = T_camera @ np.linalg.inv(T_camera2)
+    # convert to [x, y, z, qx, qy, qz, qw]
+    r = R.from_matrix(T_camera2_to_camera[:3, :3])
+    q = r.as_quat()
+    T_camera2_to_camera = np.hstack((T_camera2_to_camera[:3, 3], q[[0, 1, 2, 3]]))
+
+    return T_camera2_to_camera
 
 
 def main():
@@ -167,40 +186,60 @@ def main():
             H, W = int(resolution[1]), int(resolution[0])
             bins = 5
 
+        extrinsics = read_extrinsic(
+            args.data_h5, args.camera, args.camera.replace("left", "right")
+        )
+
         slam = DEVO(
             cfg,
             args.network,
             ht=H,
             wd=W,
             show=args.show,
+            extrinsics=extrinsics,
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
 
-        for i, (t, voxel, intrinsics) in enumerate(
-            pgenerator(
-                ev_generator,
-                path=args.data_h5,
-                camera_name=args.camera,
-                period=args.period,
-                size=10,
-                t_limits=(args.start, args.stop),
-                scale=args.scale,
-                bins=bins,
-                stride=args.stride,
-                fisheye=args.fisheye,
-            )
+        generator1 = pgenerator(
+            ev_generator,
+            path=args.data_h5,
+            camera_name=args.camera,
+            period=args.period,
+            t_limits=(args.start, args.stop),
+            scale=args.scale,
+            bins=bins,
+            stride=args.stride,
+        )
+
+        generator2 = pgenerator(
+            ev_generator,
+            path=args.data_h5,
+            camera_name=args.camera.replace("left", "right"),
+            period=args.period,
+            t_limits=(args.start, args.stop),
+            scale=args.scale,
+            bins=bins,
+            stride=args.stride,
+        )
+
+        for i, ((t1, voxel1, intrinsics1), (t2, voxel2, intrinsics2)) in enumerate(
+            zip(generator1, generator2, strict=False)
         ):
             if args.show:
-                img = voxel_to_img(voxel)
-                cv2.imshow("voxel", img)
+                img1 = voxel_to_img(voxel1)
+                img2 = voxel_to_img(voxel2)
+                concat = cv2.hconcat([img1, img2])
+                cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
-            voxel = torch.from_numpy(voxel).cuda()
-            intrinsics = torch.from_numpy(intrinsics).cuda()
+            voxel1 = torch.from_numpy(voxel1).cuda()
+            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
+            voxel2 = torch.from_numpy(voxel2).cuda()
+            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
-            with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                slam(t, voxel, intrinsics)
+            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
+                slam(t1, (voxel1, voxel2), (intrinsics1, intrinsics2))
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
@@ -239,7 +278,7 @@ def main():
         save_ply(scene, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics, H, W)
+        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics1, H, W)
 
     if args.save_point_cloud:
         os.makedirs("saved_point_clouds", exist_ok=True)
@@ -265,7 +304,7 @@ def main():
                 est_name="traj",
                 pose_relation=PoseRelation.translation_part,
                 align=True,
-                correct_scale=True,
+                correct_scale=False,
             )
             ate_score = result.stats["rmse"]
             print(f"ATE: {ate_score:.03f}")
@@ -286,7 +325,7 @@ def main():
             plot_name,
             f"trajectory_plots/M3ED_{scene}{args.name}.pdf",
             align=True,
-            correct_scale=True,
+            correct_scale=False,
         )
 
 

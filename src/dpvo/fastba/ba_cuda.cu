@@ -71,17 +71,48 @@ adjSE3(const float *t, const float *q, const float *X, float *Y) {
   Y[5] += v[2];
 }
 
+// Omega(qj) = 
+//  qj[3]  -qj[2]   qj[1]   qj[0]
+//  qj[2]   qj[3]  -qj[0]   qj[1]
+// -qj[1]   qj[0]   qj[3]   qj[2]
+// -qj[0]  -qj[1]  -qj[2]   qj[3]
+
+// qi_inv = (-qi[0],-qi[1],-qi[2],qi[3])
+
+// qi is g to i
+// ti is g in i
+// qij is i to j 
+// tij is i in j
+
 __device__ void 
 relSE3(const float *ti, const float *qi, const float *tj, const float *qj, float *tij, float *qij) {
-  qij[0] = -qj[3] * qi[0] + qj[0] * qi[3] - qj[1] * qi[2] + qj[2] * qi[1],
-  qij[1] = -qj[3] * qi[1] + qj[1] * qi[3] - qj[2] * qi[0] + qj[0] * qi[2],
-  qij[2] = -qj[3] * qi[2] + qj[2] * qi[3] - qj[0] * qi[1] + qj[1] * qi[0],
-  qij[3] =  qj[3] * qi[3] + qj[0] * qi[0] + qj[1] * qi[1] + qj[2] * qi[2],
+
+  // Omega(qj) @ qi_inv
+  qij[0] = -qj[3] * qi[0]  +  qj[2] * qi[1]  -  qj[1] * qi[2]  +  qj[0] * qi[3];
+  qij[1] = -qj[2] * qi[0]  -  qj[3] * qi[1]  +  qj[0] * qi[2]  +  qj[1] * qi[3];
+  qij[2] =  qj[1] * qi[0]  -  qj[0] * qi[1]  -  qj[3] * qi[2]  +  qj[2] * qi[3];
+  qij[3] =  qj[0] * qi[0]  +  qj[1] * qi[1]  +  qj[2] * qi[2]  +  qj[3] * qi[3];
 
   actSO3(qij, ti, tij);
   tij[0] = tj[0] - tij[0];
   tij[1] = tj[1] - tij[1];
   tij[2] = tj[2] - tij[2];
+}
+
+
+__device__ void 
+actSE3Fully(const float *tjk, const float *qjk, const float *tij, const float *qij, float *tik, float *qik) {
+
+  // Omega(qjk) @ qij
+  qik[0] =  qjk[3] * qij[0]  -  qjk[2] * qij[1]  +  qjk[1] * qij[2]  +  qjk[0] * qij[3];
+  qik[1] =  qjk[2] * qij[0]  +  qjk[3] * qij[1]  -  qjk[0] * qij[2]  +  qjk[1] * qij[3];
+  qik[2] = -qjk[1] * qij[0]  +  qjk[0] * qij[1]  +  qjk[3] * qij[2]  +  qjk[2] * qij[3];
+  qik[3] = -qjk[0] * qij[0]  -  qjk[1] * qij[1]  -  qjk[2] * qij[2]  +  qjk[3] * qij[3];
+
+  actSO3(qjk, tij, tik);
+  tik[0] += tjk[0];
+  tik[1] += tjk[1];
+  tik[2] += tjk[2];
 }
 
   
@@ -233,8 +264,12 @@ __global__ void reprojection_residuals_and_hessian(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,
     const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> patches,
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> intrinsics,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> intrinsics_s,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> extrinsics,
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> target,
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> weight,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> target_s,
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> weight_s,
     const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> lmbda,
     const torch::PackedTensorAccessor32<long,2,torch::RestrictPtrTraits> ij_xself,
     const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
@@ -247,15 +282,21 @@ __global__ void reprojection_residuals_and_hessian(
     torch::PackedTensorAccessor32<mtype,2,torch::RestrictPtrTraits> E,
     torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> C,
     torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> v,
-    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> u, const int t0, const int ppf)
+    torch::PackedTensorAccessor32<mtype,1,torch::RestrictPtrTraits> u, const int t0, const int ppf, bool stereo)
 {
 
-  __shared__ float fx, fy, cx, cy;
+  __shared__ float fx, fy, cx, cy, fx_s, fy_s, cx_s, cy_s;
   if (threadIdx.x == 0) {
     fx = intrinsics[0][0];
     fy = intrinsics[0][1];
     cx = intrinsics[0][2];
     cy = intrinsics[0][3];
+
+    // Get the intrinsics of the stereo camera 
+    fx_s = intrinsics_s[0][0];
+    fy_s = intrinsics_s[0][1];
+    cx_s = intrinsics_s[0][2];
+    cy_s = intrinsics_s[0][3];
   }
 
   bool eff_impl = (ppf > 0);
@@ -307,6 +348,9 @@ __global__ void reprojection_residuals_and_hessian(
 
     const float mask = in_bounds ? 1.0 : 0.0;
 
+    int px_p = static_cast<int>(patches[kx][0][1][1]);
+    int py_p = static_cast<int>(patches[kx][1][1][1]);
+    
     ix = ix - t0;
     jx = jx - t0;
 
@@ -371,9 +415,110 @@ __global__ void reprojection_residuals_and_hessian(
 
       atomicAdd(&C[k], w * Jz * Jz);
       atomicAdd(&u[k], w *  r * Jz);
-    }
-  }
-}
+    } // for (int row=0; row<2; row++)
+
+    
+    
+    if(stereo){
+      
+      float Xj_s[4]; // Position of the landmark in the right target frame
+      float tps[3] = {extrinsics[0][0], extrinsics[0][1], extrinsics[0][2]}; // position of primary frame in secondary (stereo) frame
+      float qps[4] = {extrinsics[0][3], extrinsics[0][4], extrinsics[0][5], extrinsics[0][6]}; // rotation from primary frame to secondary frame
+      float tij_s[3], qij_s[4]; // From left source frame to right target frame
+      
+      // Compute the pose of the right frame with respect to anchor frame
+      actSE3Fully(tps, qps, tij, qij, tij_s, qij_s);
+
+      // Compute the pose of the landmark with respect to projection frame
+      actSE3(tij_s, qij_s, Xi, Xj_s);
+
+      const float X_s = Xj_s[0];
+      const float Y_s = Xj_s[1];
+      const float Z_s = Xj_s[2];
+      const float W_s = Xj_s[3];
+
+      const float d_s = (Z_s >= 0.2) ? 1.0 / Z_s : 0.0; 
+      const float d2_s = d_s * d_s;
+
+      const float x1_s = fx_s * (X_s / Z_s) + cx_s;
+      const float y1_s = fy_s * (Y_s / Z_s) + cy_s;
+
+      // Compute residuals
+      const float rx_s = target_s[n][0] - x1_s;
+      const float ry_s = target_s[n][1] - y1_s;
+
+      // TO DO : change this boundary conditions with a proper loss function
+      const bool in_bounds_s = (sqrt(rx_s*rx_s + ry_s*ry_s) < 128) && (Z_s > 0.2) &&
+        (x1_s > -64) && (y1_s > -64) && (x1_s < 2*cx + 64) && (y1_s < 2*cy + 64);
+
+      const float mask_s = in_bounds_s ? 1.0 : 0.0;
+
+
+
+      for (int row=0; row<2; row++) {
+
+        float *Jj, Jjs[6], Jis[6], Jz, r, w;
+
+        if (row == 0){
+          r = rx_s;
+          w = mask_s * weight_s[n][0];
+
+          Jz = fx_s * (tij_s[0] * d_s - tij_s[2] * (X_s * d2_s));
+          Jj = (float[6]){fx_s*W_s*d_s, 0, -fx_s*X_s*W_s*d2_s, -fx_s*X_s*Y_s*d2_s, fx_s*(1.0+X_s*X_s*d2_s), -fx_s*Y_s*d_s};
+        } else {
+          r = ry_s;
+          w = mask_s * weight_s[n][1];
+
+          Jz = fy_s * (tij_s[1] * d_s - tij_s[2] * (Y_s * d2_s));
+          Jj = (float[6]){0, fy_s*W_s*d_s, -fy_s*Y_s*W_s*d2_s, fy_s*(-1.0-Y_s*Y_s*d2_s), fy_s*(Y_s*X_s*d2_s), fy_s*X_s*d_s};
+        }
+
+        
+        // Fameous Adjoint tricks
+        adjSE3(tps, qps, Jj, Jjs);     
+        adjSE3(tij_s, qij_s, Jj, Jis);
+        
+        // Rest is the same with original DPVO
+        for (int i=0; i<6; i++) {
+          for (int j=0; j<6; j++) {
+            if (ix >= 0)
+              atomicAdd(&B[6*ix+i][6*ix+j],  w * Jis[i] * Jis[j]);
+            if (jx >= 0)
+              atomicAdd(&B[6*jx+i][6*jx+j],  w * Jjs[i] * Jjs[j]);
+            if (ix >= 0 && jx >= 0) {
+              atomicAdd(&B[6*ix+i][6*jx+j], -w * Jis[i] * Jjs[j]);
+              atomicAdd(&B[6*jx+i][6*ix+j], -w * Jjs[i] * Jis[j]);
+            }
+          }
+        }
+
+        for (int i=0; i<6; i++) {
+          if (eff_impl){
+            atomicAdd(&E_lookup[ijs][kx % ppf][i],  -w * Jz * Jis[i]);
+            atomicAdd(&E_lookup[ijx][kx % ppf][i],  w * Jz * Jjs[i]);
+          } else {
+            if (ix >= 0)
+              atomicAdd(&E[6*ix+i][k], -w * Jz * Jis[i]);
+            if (jx >= 0)
+              atomicAdd(&E[6*jx+i][k],  w * Jz * Jjs[i]);
+          }
+
+        }
+
+        for (int i=0; i<6; i++) {
+          if (ix >= 0)
+            atomicAdd(&v[6*ix+i], -w * r * Jis[i]);
+          if (jx >= 0)
+            atomicAdd(&v[6*jx+i],  w * r * Jjs[i]);
+        }
+
+        atomicAdd(&C[k], w * Jz * Jz);
+        atomicAdd(&u[k], w *  r * Jz);
+      } // for (int row=0; row<2; row++)
+
+    } // Stereo Factors
+  } // GPU_1D_KERNEL_LOOP(n, ii.size(0))
+} // __global__ void reprojection_residuals_and_hessian
 
 
 __global__ void reproject(
@@ -434,14 +579,18 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor poses,
     torch::Tensor patches,
     torch::Tensor intrinsics,
+    torch::Tensor intrinsics_s,
+    torch::Tensor extrinsics,
     torch::Tensor target,
     torch::Tensor weight,
+    torch::Tensor target_s,
+    torch::Tensor weight_s,
     torch::Tensor lmbda,
     torch::Tensor ii,
     torch::Tensor jj,
     torch::Tensor kk,
     const int PPF,
-    const int t0, const int t1, const int iterations, bool eff_impl)
+    const int t0, const int t1, const int iterations, bool eff_impl, bool stereo)
 {
 
   auto ktuple = torch::_unique(kk, true, true);
@@ -452,15 +601,18 @@ std::vector<torch::Tensor> cuda_ba(
   const int M = kx.size(0); // number of patches
   const int P = patches.size(3); // patch size
 
-  // auto opts = torch::TensorOptions()
-  //   .dtype(torch::kFloat32).device(torch::kCUDA);
-
-  poses = poses.view({-1, 7});
+  poses   = poses.view({-1, 7});
   patches = patches.view({-1,3,P,P});
-  intrinsics = intrinsics.view({-1, 4});
+
+  intrinsics   = intrinsics.view({-1, 4});
+  intrinsics_s = intrinsics_s.view({-1, 4});
+  extrinsics   = extrinsics.view({-1, 7});
 
   target = target.view({-1, 2});
   weight = weight.view({-1, 2});
+
+  target_s = target_s.view({-1, 2});
+  weight_s = weight_s.view({-1, 2});
 
   const int num = ii.size(0);
   torch::Tensor B = torch::empty({6*N, 6*N}, mdtype);
@@ -496,8 +648,12 @@ std::vector<torch::Tensor> cuda_ba(
       poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
       intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      intrinsics_s.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      extrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       target.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       weight.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      target_s.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      weight_s.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
       lmbda.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
       blockE->ij_xself.packed_accessor32<long,2,torch::RestrictPtrTraits>(),
       ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
@@ -510,7 +666,7 @@ std::vector<torch::Tensor> cuda_ba(
       E.packed_accessor32<mtype,2,torch::RestrictPtrTraits>(),
       C.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
       v.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(),
-      u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(), t0, blockE->ppf);
+      u.packed_accessor32<mtype,1,torch::RestrictPtrTraits>(), t0, blockE->ppf, stereo);
 
     // std::cout << "Total residuals: " << r_total.item<double>() << std::endl;
     v = v.view({6*N, 1});
