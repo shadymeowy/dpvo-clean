@@ -33,7 +33,14 @@ from dpvo.utils import Timer
 
 
 def ev_generator(
-    path, camera_name, period, t_limits=(None, None), scale=1.0, bins=5, stride=1
+    path,
+    camera_name,
+    period,
+    t_limits=(None, None),
+    scale=1.0,
+    bins=5,
+    stride=1,
+    fisheye=False,
 ):
     f = h5py.File(path, "r")
     camera_model = f.get(f"{camera_name}/calib/camera_model")[()]
@@ -56,7 +63,7 @@ def ev_generator(
             [0, 0, 1],
         ]
     )
-    K_new, rect_map = compute_remap(K, distortion_coeffs, W, H)
+    K_new, rect_map = compute_remap(K, distortion_coeffs, W, H, fisheye=fisheye)
     intrinsics_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
     duration = (t[-1] - t[0]) / 1e6
 
@@ -137,6 +144,7 @@ def main():
     parser.add_argument("--clahe", action="store_true")  # wont work
     parser.add_argument("--save_point_cloud", action="store_true")
     parser.add_argument("--save_matches", action="store_true")
+    parser.add_argument("--fisheye", action="store_true")
 
     args = parser.parse_args()
 
@@ -180,6 +188,7 @@ def main():
                 scale=args.scale,
                 bins=bins,
                 stride=args.stride,
+                fisheye=args.fisheye,
             )
         ):
             if args.show:
