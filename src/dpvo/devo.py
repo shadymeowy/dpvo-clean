@@ -30,6 +30,7 @@ class DEVO:
         show=False,
         enable_timing=False,
         timing_file=None,
+        extrinsics=np.array([0, 0, 0, 0, 0, 0, 1], dtype=np.float32),
     ):
         self.cfg = cfg
         self.load_weights(network)
