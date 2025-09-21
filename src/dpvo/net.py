@@ -100,8 +100,7 @@ class ePatchifier(nn.Module):
         self.inet = BasicEncoder4(
             output_dim=self.dim_inet, dim=dim, norm_fn="none", bins=5
         )  # context-feature extractor
-        if self.patch_selector == SelectionMethod.SCORER:
-            self.scorer = Scorer(5)
+        self.scorer = Scorer(5)
 
     def __image_gradient(self, images):
         images = images.sum(dim=2)  # sum over bins
