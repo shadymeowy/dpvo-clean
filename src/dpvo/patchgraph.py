@@ -59,6 +59,8 @@ class PatchGraph:
         self.kk_inac = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.weight_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
         self.target_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
+        self.weight_s_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
+        self.target_s_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
 
     def edges_loop(self):
         """Adding edges from old patches to new frames"""
