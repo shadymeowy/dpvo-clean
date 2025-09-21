@@ -127,7 +127,6 @@ def read_extrinsic(path, camera_name, camera2_name):
         T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
         T_camera2 = h5[f"{camera2_name}/calib/T_to_prophesee_left"][()]
 
-    # T_camera2_to_camera = np.linalg.inv(T_camera2) @ T_camera
     T_camera2_to_camera = T_camera @ np.linalg.inv(T_camera2)
     # convert to [x, y, z, qx, qy, qz, qw]
     r = R.from_matrix(T_camera2_to_camera[:3, :3])
