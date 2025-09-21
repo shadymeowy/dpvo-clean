@@ -54,6 +54,7 @@ class DEVO:
 
         ### state attributes ###
         self.tlist = []
+        self.online_poses = []
         self.counter = 0
 
         # keep track of global-BA calls
@@ -173,7 +174,7 @@ class DEVO:
 
     @property
     def intrinsics_s(self):
-        return self.pg.intrinsics_.view(1, self.N, 4)
+        return self.pg.intrinsics_s_.view(1, self.N, 4)
 
     @property
     def ix(self):
@@ -210,7 +211,7 @@ class DEVO:
         t0, dP = self.pg.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self):
+    def terminate(self, online=False):
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.terminate(self.n)
 
@@ -222,30 +223,27 @@ class DEVO:
             self.update()
 
         """ interpolate missing poses """
-        self.traj = {}
-        for i in range(self.n):
-            self.traj[self.pg.tstamps_[i].item()] = self.pg.poses_[i]
+        if not online:
+            self.traj = {}
+            for i in range(self.n):
+                self.traj[self.pg.tstamps_[i]] = self.pg.poses_[i]
 
-        if self.is_initialized:
             poses = [self.get_pose(t) for t in range(self.counter)]
             poses = lietorch.stack(poses, dim=0)
             poses = poses.inv().data.cpu().numpy()
+            tstamps = np.array(self.tlist, dtype=np.float64)
+            return poses, tstamps
         else:
-            print(
-                "Warning: Model is not initialized. Using Identity."
-            )  # eval still runs bug
-            id = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0]
-            poses = np.array([id for t in range(self.counter)])
-            poses[:, :3] = (
-                poses[:, :3] + np.random.randn(self.counter, 3) * 0.01
-            )  # small random trans
-
-        tstamps = np.array(self.tlist, dtype=np.float64)
-        if self.viewer is not None:
-            self.viewer.join()
-
-        # Poses: x y z qx qy qz qw
-        return poses, tstamps
+            poses = self.online_poses
+            poses2, tstamps2 = [], []
+            for pose, t in zip(poses, self.tlist):
+                if pose is None:
+                    continue
+                poses2.append(pose)
+                tstamps2.append(t)
+            poses2 = np.array(poses2)
+            tstamps2 = np.array(tstamps2)
+            return poses2, tstamps2
 
     def corr(self, coords, indicies=None):
         """local correlation volume"""
@@ -316,6 +314,12 @@ class DEVO:
             )
             self.pg.target_inac = torch.cat(
                 (self.pg.target_inac, self.pg.target[:, m]), dim=1
+            )
+            self.pg.weight_s_inac = torch.cat(
+                (self.pg.weight_s_inac, self.pg.weight_s[:, m]), dim=1
+            )
+            self.pg.target_s_inac = torch.cat(
+                (self.pg.target_s_inac, self.pg.target_s[:, m]), dim=1
             )
         self.pg.weight = self.pg.weight[:, ~m]
         self.pg.target = self.pg.target[:, ~m]
@@ -419,6 +423,8 @@ class DEVO:
         Includes both active and inactive edges"""
         full_target = torch.cat((self.pg.target_inac, self.pg.target), dim=1)
         full_weight = torch.cat((self.pg.weight_inac, self.pg.weight), dim=1)
+        full_target_s = torch.cat((self.pg.target_s_inac, self.pg.target_s), dim=1)
+        full_weight_s = torch.cat((self.pg.weight_s_inac, self.pg.weight_s), dim=1)
         full_ii = torch.cat((self.pg.ii_inac, self.pg.ii))
         full_jj = torch.cat((self.pg.jj_inac, self.pg.jj))
         full_kk = torch.cat((self.pg.kk_inac, self.pg.kk))
@@ -430,8 +436,12 @@ class DEVO:
             self.poses,
             self.patches,
             self.intrinsics,
+            self.intrinsics_s,
+            self.extrinsics,
             full_target,
             full_weight,
+            full_target_s,
+            full_weight_s,
             lmbda,
             full_ii,
             full_jj,
@@ -441,6 +451,7 @@ class DEVO:
             M=self.M,
             iterations=2,
             eff_impl=True,
+            stereo=True,
         )
         self.ran_global_ba[self.n] = True
 
@@ -464,12 +475,12 @@ class DEVO:
                     self.pg.net_s, ctx, corr_s, None, self.pg.ii, self.pg.jj, self.pg.kk
                 )
 
-            lmbda = torch.as_tensor([1e-4], device="cuda")
-            weight = weight.float()
-            target = coords[..., self.P // 2, self.P // 2] + delta.float()
+                lmbda = torch.as_tensor([1e-4], device="cuda")
+                weight = weight.float()
+                target = coords[..., self.P // 2, self.P // 2] + delta.float()
 
-            weight_s = weight_s.float()
-            target_s = coords_s[..., self.P // 2, self.P // 2] + delta_s.float()
+                weight_s = weight_s.float()
+                target_s = coords_s[..., self.P // 2, self.P // 2] + delta_s.float()
 
         self.pg.target = target
         self.pg.weight = weight
@@ -511,8 +522,8 @@ class DEVO:
                         eff_impl=False,
                         stereo=True,
                     )
-            except Exception as _:
-                print("Warning BA failed...")
+            except Exception as e:
+                print("Warning BA failed...", e)
 
             points = pops.point_cloud(
                 SE3(self.poses),
@@ -628,18 +639,15 @@ class DEVO:
         if self.viewer is not None:
             self.viewer.update_image(image_p.contiguous())
 
-        if False:
-            image_p = 2 * (image_p[None, None] / 255.0) - 0.5
-        else:
-            image_p = image_p[None, None]
-            image_s = image_s[None, None]
+        image_p = image_p[None, None]
+        image_s = image_s[None, None]
 
-            image_p = self.norm_events(image_p)
-            if image_p is None:
-                return
-            image_s = self.norm_events(image_s)
-            if image_s is None:
-                return
+        image_p = self.norm_events(image_p)
+        if image_p is None:
+            return
+        image_s = self.norm_events(image_s)
+        if image_s is None:
+            return
 
         with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
             with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
@@ -651,7 +659,7 @@ class DEVO:
                     scorer_eval_use_grid=self.cfg.SCORER_EVAL_USE_GRID,
                 )
 
-            fmap_s = self.network.patchify.fnet(image_s) / 4.0
+                fmap_s = self.network.patchify.fnet(image_s) / 4.0
 
         ### update state attributes ###
         self.tlist.append(tstamp)
@@ -700,6 +708,7 @@ class DEVO:
             thres = 2.0 if scale == 1.0 else scale**2
             if self.motion_probe() < thres:
                 self.pg.delta[self.counter - 1] = (self.counter - 2, Id[0])
+                self.online_poses.append(None)
                 return
 
         self.n += 1
@@ -730,6 +739,10 @@ class DEVO:
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.attempt_loop_closure(self.n)
             self.long_term_lc.lc_callback()
+
+        self.online_poses.append(
+            SE3(self.pg.poses_[self.n - 1]).inv().data.cpu().numpy()
+        )
 
         if self.show:
             try:
@@ -793,7 +806,7 @@ class DEVO:
 
         connections = kk[roi]
 
-        for con_idx, connection_id in enumerate(connections[:20]):
+        for con_idx, connection_id in enumerate(connections):
             source_coord = (
                 self.pg.patches_[source_idx, con_idx, :2, 2, 2].cpu().numpy() * 4
             ).astype(int)

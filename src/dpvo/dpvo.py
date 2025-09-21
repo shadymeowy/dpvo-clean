@@ -53,6 +53,7 @@ class DPVO:
 
         ### state attributes ###
         self.tlist = []
+        self.online_poses = []
         self.counter = 0
 
         # keep track of global-BA calls
@@ -158,7 +159,7 @@ class DPVO:
 
     @property
     def intrinsics_s(self):
-        return self.pg.intrinsics_.view(1, self.N, 4)
+        return self.pg.intrinsics_s_.view(1, self.N, 4)
 
     @property
     def ix(self):
@@ -195,7 +196,7 @@ class DPVO:
         t0, dP = self.pg.delta[t]
         return dP * self.get_pose(t0)
 
-    def terminate(self):
+    def terminate(self, online=False):
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.terminate(self.n)
 
@@ -207,19 +208,27 @@ class DPVO:
             self.update()
 
         """ interpolate missing poses """
-        self.traj = {}
-        for i in range(self.n):
-            self.traj[self.pg.tstamps_[i]] = self.pg.poses_[i]
+        if not online:
+            self.traj = {}
+            for i in range(self.n):
+                self.traj[self.pg.tstamps_[i]] = self.pg.poses_[i]
 
-        poses = [self.get_pose(t) for t in range(self.counter)]
-        poses = lietorch.stack(poses, dim=0)
-        poses = poses.inv().data.cpu().numpy()
-        tstamps = np.array(self.tlist, dtype=np.float64)
-        if self.viewer is not None:
-            self.viewer.join()
-
-        # Poses: x y z qx qy qz qw
-        return poses, tstamps
+            poses = [self.get_pose(t) for t in range(self.counter)]
+            poses = lietorch.stack(poses, dim=0)
+            poses = poses.inv().data.cpu().numpy()
+            tstamps = np.array(self.tlist, dtype=np.float64)
+            return poses, tstamps
+        else:
+            poses = self.online_poses
+            poses2, tstamps2 = [], []
+            for pose, t in zip(poses, self.tlist):
+                if pose is None:
+                    continue
+                poses2.append(pose)
+                tstamps2.append(t)
+            poses2 = np.array(poses2)
+            tstamps2 = np.array(tstamps2)
+            return poses2, tstamps2
 
     def corr(self, coords, indicies=None):
         """local correlation volume"""
@@ -291,6 +300,12 @@ class DPVO:
             self.pg.target_inac = torch.cat(
                 (self.pg.target_inac, self.pg.target[:, m]), dim=1
             )
+            self.pg.weight_s_inac = torch.cat(
+                (self.pg.weight_s_inac, self.pg.weight_s[:, m]), dim=1
+            )
+            self.pg.target_s_inac = torch.cat(
+                (self.pg.target_s_inac, self.pg.target_s[:, m]), dim=1
+            )
         self.pg.weight = self.pg.weight[:, ~m]
         self.pg.target = self.pg.target[:, ~m]
 
@@ -340,8 +355,8 @@ class DPVO:
 
         if m / 2 < self.cfg.KEYFRAME_THRESH:
             k = self.n - self.cfg.KEYFRAME_INDEX
-            t0 = self.pg.tstamps_[k - 1]
-            t1 = self.pg.tstamps_[k]
+            t0 = self.pg.tstamps_[k - 1].item()
+            t1 = self.pg.tstamps_[k].item()
 
             dP = SE3(self.pg.poses_[k]) * SE3(self.pg.poses_[k - 1]).inv()
             self.pg.delta[t1] = (t0, dP)
@@ -393,6 +408,8 @@ class DPVO:
         Includes both active and inactive edges"""
         full_target = torch.cat((self.pg.target_inac, self.pg.target), dim=1)
         full_weight = torch.cat((self.pg.weight_inac, self.pg.weight), dim=1)
+        full_target_s = torch.cat((self.pg.target_s_inac, self.pg.target_s), dim=1)
+        full_weight_s = torch.cat((self.pg.weight_s_inac, self.pg.weight_s), dim=1)
         full_ii = torch.cat((self.pg.ii_inac, self.pg.ii))
         full_jj = torch.cat((self.pg.jj_inac, self.pg.jj))
         full_kk = torch.cat((self.pg.kk_inac, self.pg.kk))
@@ -404,8 +421,12 @@ class DPVO:
             self.poses,
             self.patches,
             self.intrinsics,
+            self.intrinsics_s,
+            self.extrinsics,
             full_target,
             full_weight,
+            full_target_s,
+            full_weight_s,
             lmbda,
             full_ii,
             full_jj,
@@ -415,6 +436,7 @@ class DPVO:
             M=self.M,
             iterations=2,
             eff_impl=True,
+            stereo=True,
         )
         self.ran_global_ba[self.n] = True
 
@@ -428,6 +450,7 @@ class DPVO:
                 corr = self.corr(coords)
                 corr_s = self.corr_s(coords_s)
 
+            with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
 
                 self.pg.net, (delta, weight, _) = self.network.update(
@@ -437,7 +460,6 @@ class DPVO:
                     self.pg.net_s, ctx, corr_s, None, self.pg.ii, self.pg.jj, self.pg.kk
                 )
 
-            with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 lmbda = torch.as_tensor([1e-4], device="cuda")
                 weight = weight.float()
                 target = coords[..., self.P // 2, self.P // 2] + delta.float()
@@ -485,8 +507,8 @@ class DPVO:
                         eff_impl=False,
                         stereo=True,
                     )
-            except Exception as _:
-                print("Warning BA failed...")
+            except Exception as e:
+                print("Warning BA failed...", e)
 
             points = pops.point_cloud(
                 SE3(self.poses),
@@ -601,6 +623,7 @@ class DPVO:
         if self.n > 0 and not self.is_initialized:
             if self.motion_probe() < 2.0:
                 self.pg.delta[self.counter - 1] = (self.counter - 2, Id[0])
+                self.online_poses.append(None)
                 return
 
         self.n += 1
@@ -631,6 +654,10 @@ class DPVO:
         if self.cfg.CLASSIC_LOOP_CLOSURE:
             self.long_term_lc.attempt_loop_closure(self.n)
             self.long_term_lc.lc_callback()
+
+        self.online_poses.append(
+            SE3(self.pg.poses_[self.n - 1]).inv().data.cpu().numpy()
+        )
 
         if self.show:
             try:
@@ -688,7 +715,7 @@ class DPVO:
 
         connections = kk[roi]
 
-        for con_idx, connection_id in enumerate(connections[:20]):
+        for con_idx, connection_id in enumerate(connections):
             source_coord = (
                 self.pg.patches_[source_idx, con_idx, :2, 2, 2].cpu().numpy() * 4
             ).astype(int)
@@ -710,9 +737,9 @@ class DPVO:
 
             center1 = (source_coord[0], source_coord[1])
             center2 = (target_coord[0] + img1_vis.shape[1], target_coord[1])
-            cv2.line(concatenated, center1, center2, color, 2, cv2.LINE_AA)
-            # cv2.circle(concatenated, center1, 3, color, -1)
-            # cv2.circle(concatenated, center2, 3, color, -1)
+            # cv2.line(concatenated, center1, center2, color, 2, cv2.LINE_AA)
+            cv2.circle(concatenated, center1, 3, color, -1)
+            cv2.circle(concatenated, center2, 3, color, -1)
 
         cv2.imshow("matches", concatenated)
         self.concatenated_image = concatenated
