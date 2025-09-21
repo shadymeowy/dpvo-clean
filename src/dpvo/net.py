@@ -292,6 +292,30 @@ class Patchifier(nn.Module):
         elif centroid_sel_strat == "RANDOM":
             x = torch.randint(1, w - 1, size=[n, patches_per_image], device="cuda")
             y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
+        elif centroid_sel_strat == "GRID":
+            grid_size = int(np.sqrt(patches_per_image))
+            assert grid_size**2 == patches_per_image, "patches_per_image must be a perfect square"
+
+            # Size of each cell
+            cell_w = (w + grid_size - 1) // grid_size
+            cell_h = (h + grid_size - 1) // grid_size
+
+            # Create grid of cell origins
+            x_base = torch.arange(grid_size, device="cuda") * cell_w
+            y_base = torch.arange(grid_size, device="cuda") * cell_h
+            x_mesh, y_mesh = torch.meshgrid(x_base, y_base, indexing="xy")
+
+            # Sample random offset within each cell
+            x_offset = torch.randint(0, cell_w, size=x_mesh.shape, device="cuda")
+            y_offset = torch.randint(0, cell_h, size=y_mesh.shape, device="cuda")
+
+            # Final sample locations
+            x = (x_mesh + x_offset).reshape(-1)[None]
+            y = (y_mesh + y_offset).reshape(-1)[None]
+
+            # Clamp to image boundaries
+            x = torch.clamp(x, 1, w - 1)
+            y = torch.clamp(y, 1, h - 1)
 
         elif centroid_sel_strat == "DEDODE":
             if self.dedode is None:
