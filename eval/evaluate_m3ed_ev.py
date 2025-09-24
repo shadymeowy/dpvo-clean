@@ -84,8 +84,6 @@ def ev_generator(
     print("duration", duration)
     print("number of events", len(t))
 
-    voxel = np.zeros((bins + 1, H, W), dtype=np.float32)
-
     for idx in tqdm(range(N1, N2, stride)):
         tperf = time.perf_counter()
         t0_ms = period * idx
