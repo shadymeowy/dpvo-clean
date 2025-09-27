@@ -25,8 +25,8 @@ class Timer(ContextDecorator):
     def __exit__(self, type, value, traceback):
         global all_times
         if self.enabled:
-            torch.cuda.synchronize()
             self.end.record()
+            torch.cuda.synchronize()
 
             elapsed = self.start.elapsed_time(self.end)
             all_times.append(elapsed)
