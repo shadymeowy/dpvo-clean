@@ -114,13 +114,14 @@ class PatchGraph:
         kk = ii.mul(self.M) + torch.arange(self.M, device=ii.device)
         return kk.flatten(), jj.flatten()
 
-    def normalize(self):
+    def normalize(self, scale=False):
         """normalize depth and poses"""
-        s = self.patches_[: self.n, :, 2].mean()
-        self.patches_[: self.n, :, 2] /= s
-        self.poses_[: self.n, :3] *= s
-        for t, (t0, dP) in self.delta.items():
-            self.delta[t] = (t0, dP.scale(s))
+        if scale:
+            s = self.patches_[: self.n, :, 2].mean()
+            self.patches_[: self.n, :, 2] /= s
+            self.poses_[: self.n, :3] *= s
+            for t, (t0, dP) in self.delta.items():
+                self.delta[t] = (t0, dP.scale(s))
         self.poses_[: self.n] = (
             SE3(self.poses_[: self.n]) * SE3(self.poses_[[0]]).inv()
         ).data
