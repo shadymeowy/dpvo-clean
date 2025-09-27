@@ -364,59 +364,60 @@ class DEVO:
         return flow.mean().item()
 
     def keyframe(self):
-        i = self.n - self.cfg.KEYFRAME_INDEX - 1
-        j = self.n - self.cfg.KEYFRAME_INDEX + 1
-        m = self.motionmag(i, j) + self.motionmag(j, i)
+        with Timer("keyframe", enabled=self.enable_timing, file=self.timing_file):
+            i = self.n - self.cfg.KEYFRAME_INDEX - 1
+            j = self.n - self.cfg.KEYFRAME_INDEX + 1
+            m = self.motionmag(i, j) + self.motionmag(j, i)
 
-        if m / 2 < self.cfg.KEYFRAME_THRESH:
-            k = self.n - self.cfg.KEYFRAME_INDEX
-            t0 = self.pg.tstamps_[k - 1].item()
-            t1 = self.pg.tstamps_[k].item()
+            if m / 2 < self.cfg.KEYFRAME_THRESH:
+                k = self.n - self.cfg.KEYFRAME_INDEX
+                t0 = self.pg.tstamps_[k - 1].item()
+                t1 = self.pg.tstamps_[k].item()
 
-            dP = SE3(self.pg.poses_[k]) * SE3(self.pg.poses_[k - 1]).inv()
-            self.pg.delta[t1] = (t0, dP)
+                dP = SE3(self.pg.poses_[k]) * SE3(self.pg.poses_[k - 1]).inv()
+                self.pg.delta[t1] = (t0, dP)
 
-            to_remove = (self.pg.ii == k) | (self.pg.jj == k)
-            self.remove_factors(to_remove, store=False)
+                to_remove = (self.pg.ii == k) | (self.pg.jj == k)
+                self.remove_factors(to_remove, store=False)
 
-            self.pg.kk[self.pg.ii > k] -= self.M
-            self.pg.ii[self.pg.ii > k] -= 1
-            self.pg.jj[self.pg.jj > k] -= 1
+                self.pg.kk[self.pg.ii > k] -= self.M
+                self.pg.ii[self.pg.ii > k] -= 1
+                self.pg.jj[self.pg.jj > k] -= 1
 
-            for i in range(k, self.n - 1):
-                self.pg.tstamps_[i] = self.pg.tstamps_[i + 1]
-                self.pg.colors_[i] = self.pg.colors_[i + 1]
-                self.pg.poses_[i] = self.pg.poses_[i + 1]
-                self.pg.patches_[i] = self.pg.patches_[i + 1]
-                self.images[i] = self.images[i + 1]
-                self.pg.intrinsics_[i] = self.pg.intrinsics_[i + 1]
+                for i in range(k, self.n - 1):
+                    self.pg.tstamps_[i] = self.pg.tstamps_[i + 1]
+                    self.pg.colors_[i] = self.pg.colors_[i + 1]
+                    self.pg.poses_[i] = self.pg.poses_[i + 1]
+                    self.pg.patches_[i] = self.pg.patches_[i + 1]
+                    self.images[i] = self.images[i + 1]
+                    self.pg.intrinsics_[i] = self.pg.intrinsics_[i + 1]
 
-                self.imap_[i % self.pmem] = self.imap_[(i + 1) % self.pmem]
-                self.gmap_[i % self.pmem] = self.gmap_[(i + 1) % self.pmem]
-                self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
-                self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
+                    self.imap_[i % self.pmem] = self.imap_[(i + 1) % self.pmem]
+                    self.gmap_[i % self.pmem] = self.gmap_[(i + 1) % self.pmem]
+                    self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
+                    self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
 
-                self.pg.intrinsics_s_[i] = self.pg.intrinsics_s_[i + 1]
+                    self.pg.intrinsics_s_[i] = self.pg.intrinsics_s_[i + 1]
 
-                self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[0, (i + 1) % self.mem]
-                self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[0, (i + 1) % self.mem]
+                    self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[0, (i + 1) % self.mem]
+                    self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[0, (i + 1) % self.mem]
 
-            self.n -= 1
-            self.m -= self.M
+                self.n -= 1
+                self.m -= self.M
 
-            if self.cfg.CLASSIC_LOOP_CLOSURE:
-                self.long_term_lc.keyframe(k)
+                if self.cfg.CLASSIC_LOOP_CLOSURE:
+                    self.long_term_lc.keyframe(k)
 
-        to_remove = (
-            self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
-        )  # Remove edges falling outside the optimization window
-        if self.cfg.LOOP_CLOSURE:
-            # ...unless they are being used for loop closure
-            lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
-                self.pg.jj > (self.n - self.cfg.OPTIMIZATION_WINDOW)
-            )
-            to_remove = to_remove & ~lc_edges
-        self.remove_factors(to_remove, store=True)
+            to_remove = (
+                self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
+            )  # Remove edges falling outside the optimization window
+            if self.cfg.LOOP_CLOSURE:
+                # ...unless they are being used for loop closure
+                lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
+                    self.pg.jj > (self.n - self.cfg.OPTIMIZATION_WINDOW)
+                )
+                to_remove = to_remove & ~lc_edges
+            self.remove_factors(to_remove, store=True)
 
     def __run_global_BA(self):
         """Global bundle adjustment
