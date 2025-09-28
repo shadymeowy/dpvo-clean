@@ -268,31 +268,43 @@ class DEVO:
         (ii, jj, kk) = (
             indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
         )
-        coords = pops.transform(
-            SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
+        # coords = pops.reproject(self.poses, self.patches, self.intrinsics, ii, jj, kk)
+        coords = fastba.reproject(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            ii,
+            jj,
+            kk,
         )
-        return coords.permute(0, 1, 4, 2, 3).contiguous()
+        return coords
 
     def reproject_s(self, indicies=None):
         """reproject patch k from i -> j"""
         (ii, jj, kk) = (
             indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
         )
-
-        left_to_right = SE3(self.extrinsics.unsqueeze(1))
-        poses_right = left_to_right * SE3(self.poses)
-
-        coords = pops.transform_s(
-            source_poses=SE3(self.poses),
-            target_poses=poses_right,
-            patches=self.patches,
-            source_intrinsics=self.intrinsics,
-            target_intrinsics=self.intrinsics_s,
-            ii=ii,
-            jj=jj,
-            kk=kk,
+        # coords = pops.reproject_s(
+        #     self.poses,
+        #     self.patches,
+        #     self.intrinsics,
+        #     self.intrinsics_s,
+        #     ii,
+        #     jj,
+        #     kk,
+        #     self.extrinsics,
+        # )
+        coords = fastba.reproject_s(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            self.intrinsics_s,
+            ii,
+            jj,
+            kk,
+            self.extrinsics,
         )
-        return coords.permute(0, 1, 4, 2, 3).contiguous()
+        return coords
 
     def append_factors(self, ii, jj):
         self.pg.jj = torch.cat([self.pg.jj, jj])
