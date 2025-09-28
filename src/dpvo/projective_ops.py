@@ -227,6 +227,11 @@ def flow_mag(poses, patches, intrinsics, ii, jj, kk, beta=0.3):
     return beta * flow1 + (1 - beta) * flow2, (val > 0.5)
 
 
+def motionmag(poses, patches, intrinsics, ii, jj, kk):
+    flow, _ = flow_mag(SE3(poses), patches, intrinsics, ii, jj, kk, beta=0.5)
+    return flow.mean().item()
+
+
 def reproject(poses, patches, intrinsics, ii, jj, kk):
     coords = transform(SE3(poses), patches, intrinsics, ii, jj, kk)
     coords = coords.permute(0, 1, 4, 2, 3).contiguous()

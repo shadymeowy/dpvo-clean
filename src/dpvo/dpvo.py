@@ -355,10 +355,24 @@ class DPVO:
         jj = self.pg.jj[k]
         kk = self.pg.kk[k]
 
-        flow, _ = pops.flow_mag(
-            SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5
-        )
-        return flow.mean().item()
+        # mag = pops.motionmag(
+        #     self.poses,
+        #     self.patches,
+        #     self.intrinsics,
+        #     ii,
+        #     jj,
+        #     kk,
+        # ).item()
+        mag = fastba.motionmag(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            ii,
+            jj,
+            kk,
+        ).item()
+
+        return mag
 
     def keyframe(self):
         with Timer("keyframe", enabled=self.enable_timing, file=self.timing_file):

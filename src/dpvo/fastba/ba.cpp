@@ -43,6 +43,15 @@ torch::Tensor cuda_reproject_s(
     torch::Tensor kk,
     torch::Tensor extrinsic);
 
+torch::Tensor cuda_motionmag(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    double beta = 0.5);
+
 std::vector<torch::Tensor> ba(
     torch::Tensor poses,
     torch::Tensor patches,
@@ -82,6 +91,16 @@ torch::Tensor reproject_s(
     torch::Tensor kk,
     torch::Tensor extrinsic) {
   return cuda_reproject_s(poses, patches, source_intrinsics, target_intrinsics, ii, jj, kk, extrinsic);
+}
+
+torch::Tensor motionmag(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj, 
+    torch::Tensor kk) {
+  return cuda_motionmag(poses, patches, intrinsics, ii, jj, kk);
 }
 
 std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
@@ -211,5 +230,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("neighbors", &neighbors, "temporal neighboor indicies");
   m.def("reproject", &reproject, "temporal neighboor indicies");
   m.def("reproject_s", &reproject_s, "stereo reproject");
+  m.def("motionmag", &motionmag, "motion magnitude");
   m.def("solve_system", &solve_system, "temporal neighboor indicies");
 }

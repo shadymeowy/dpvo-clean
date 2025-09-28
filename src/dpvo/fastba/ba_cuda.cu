@@ -262,6 +262,91 @@ __global__ void patch_retr_kernel(
 }
 
 
+__global__ void motionmag_kernel(
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,      // [-1,7]
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> patches,    // [-1,3,P,P]
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> intrinsics, // [1,4] or [-1,4], we'll use [0]
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,          // [N]
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,          // [N]
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> kk,          // [N]
+    const float beta,
+    float* __restrict__ sum_out)                                                      // [1]
+{
+  __shared__ float fx, fy, cx, cy;
+  if (threadIdx.x == 0) {
+    fx = intrinsics[0][0];
+    fy = intrinsics[0][1];
+    cx = intrinsics[0][2];
+    cy = intrinsics[0][3];
+  }
+  __syncthreads();
+
+  const int P = patches.size(2);
+  float thread_sum = 0.0f;
+
+  GPU_1D_KERNEL_LOOP(n, ii.size(0)) {
+    const int iix = (int)ii[n];
+    const int jjx = (int)jj[n];
+    const int kkx = (int)kk[n];
+
+    // poses
+    float ti[3] = { poses[iix][0], poses[iix][1], poses[iix][2] };
+    float qi[4] = { poses[iix][3], poses[iix][4], poses[iix][5], poses[iix][6] };
+
+    float tj[3] = { poses[jjx][0], poses[jjx][1], poses[jjx][2] };
+    float qj[4] = { poses[jjx][3], poses[jjx][4], poses[jjx][5], poses[jjx][6] };
+
+    // relative SE3: i -> j
+    float tij[3], qij[4];
+    relSE3(ti, qi, tj, qj, tij, qij);
+
+    // translation-only variant
+    const float qid[4] = {0.f, 0.f, 0.f, 1.f};
+
+    for (int u = 0; u < P; ++u) {
+      for (int v = 0; v < P; ++v) {
+        // source pixel (coords0)
+        const float x_src = patches[kkx][0][u][v];
+        const float y_src = patches[kkx][1][u][v];
+        const float d     = patches[kkx][2][u][v];
+
+        // iproj with constant intrinsics
+        float Xi[4];
+        Xi[0] = (x_src - cx) / fx;
+        Xi[1] = (y_src - cy) / fy;
+        Xi[2] = 1.0f;
+        Xi[3] = d;
+
+        // full transform and translation-only
+        float Xj_full[4], Xj_tonly[4];
+        actSE3(tij, qij, Xi, Xj_full);
+        actSE3(tij, qid, Xi, Xj_tonly);
+
+        // proj with same intrinsics (Z.clamp(min=0.1))
+        const float invz_full  = 1.0f / fmaxf(Xj_full[2], 0.1f);
+        const float invz_tonly = 1.0f / fmaxf(Xj_tonly[2], 0.1f);
+
+        const float x_full = fx * (invz_full * Xj_full[0]) + cx;
+        const float y_full = fy * (invz_full * Xj_full[1]) + cy;
+
+        const float x_ton  = fx * (invz_tonly * Xj_tonly[0]) + cx;
+        const float y_ton  = fy * (invz_tonly * Xj_tonly[1]) + cy;
+
+        // flow magnitudes and blend
+        const float dx1 = x_full - x_src, dy1 = y_full - y_src;
+        const float dx2 = x_ton  - x_src, dy2 = y_ton  - y_src;
+        const float flow1 = sqrtf(dx1*dx1 + dy1*dy1);
+        const float flow2 = sqrtf(dx2*dx2 + dy2*dy2);
+
+        thread_sum += beta * flow1 + (1.0f - beta) * flow2;
+      }
+    }
+  }
+
+  atomicAdd(sum_out, thread_sum);
+}
+
+
 __global__ void reprojection_residuals_and_hessian(
     const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,
     const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> patches,
@@ -889,4 +974,51 @@ torch::Tensor cuda_reproject_s(
   
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return coords.view({1, N, 2, P, P});
+}
+
+torch::Tensor cuda_motionmag(
+    torch::Tensor poses,        // [*,7]
+    torch::Tensor patches,      // [*,3,P,P]
+    torch::Tensor intrinsics,   // [1,4] or [*,4]; constant => we'll read index 0
+    torch::Tensor ii,           // [N]
+    torch::Tensor jj,           // [N]
+    torch::Tensor kk,           // [N]
+    double beta = 0.5)
+{
+  TORCH_CHECK(poses.is_cuda() && patches.is_cuda() && intrinsics.is_cuda()
+              && ii.is_cuda() && jj.is_cuda() && kk.is_cuda(),
+              "All tensors must be CUDA tensors");
+
+  const c10::cuda::CUDAGuard device_guard(poses.get_device());
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  const int64_t P = patches.size(-1);
+  TORCH_CHECK(patches.size(-2) == P, "patches must be [*,3,P,P] with square P");
+
+  poses      = poses.view({-1, 7}).contiguous();
+  patches    = patches.view({-1, 3, (int)P, (int)P}).contiguous();
+  // intrinsics can be [1,4] or [K,4]; we'll just read [0]
+  intrinsics = intrinsics.view({-1, 4}).contiguous();
+  ii = ii.contiguous(); jj = jj.contiguous(); kk = kk.contiguous();
+
+  const int64_t N = ii.size(0);
+  TORCH_CHECK(jj.size(0) == N && kk.size(0) == N, "ii, jj, kk must have same length");
+
+  auto opts = poses.options().dtype(torch::kFloat32);
+  torch::Tensor sum_tensor = torch::zeros({1}, opts);
+
+  motionmag_kernel<<<NUM_BLOCKS((int)N), NUM_THREADS, 0, stream.stream()>>>(
+      poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+      intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      kk.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      static_cast<float>(beta),
+      sum_tensor.data_ptr<float>());
+
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+
+  const double denom = static_cast<double>(N) * static_cast<double>(P) * static_cast<double>(P);
+  return sum_tensor / static_cast<float>(denom);
 }
