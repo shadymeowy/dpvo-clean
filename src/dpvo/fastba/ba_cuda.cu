@@ -8,6 +8,8 @@
 #include <ATen/ATen.h>
 #include <ATen/NativeFunctions.h>
 #include <ATen/Parallel.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 #include "block_e.cuh"
 
 
@@ -564,8 +566,9 @@ __global__ void reproject(
 
         actSE3(tij, qij, Xi, Xj);
 
-        coords[n][0][i][j] = fx * (Xj[0] / Xj[2]) + cx;
-        coords[n][1][i][j] = fy * (Xj[1] / Xj[2]) + cy;
+        const float invz = 1.0f / fmaxf(Xj[2], 0.1f);
+        coords[n][0][i][j] = fx * (Xj[0] * invz) + cx;
+        coords[n][1][i][j] = fy * (Xj[1] * invz) + cy;
         // coords[n][2][i][j] = 1.0 / Xj[2];
 
       }
@@ -573,7 +576,81 @@ __global__ void reproject(
   }
 }
 
+__global__ void reproject_s(
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> poses,         // [-1,7]
+    const torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> patches,       // [-1,3,P,P]
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> src_intr,      // [-1,4] (fx_s, fy_s, cx_s, cy_s)
+    const torch::PackedTensorAccessor32<float,2,torch::RestrictPtrTraits> tgt_intr,      // [-1,4] (fx_t, fy_t, cx_t, cy_t)
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> ii,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> jj,
+    const torch::PackedTensorAccessor32<long,1,torch::RestrictPtrTraits> kk,
+    const torch::PackedTensorAccessor32<float,1,torch::RestrictPtrTraits> extrinsic,     // [7] (t,q)
+    torch::PackedTensorAccessor32<float,4,torch::RestrictPtrTraits> coords)              // [N,2,P,P]
+{
+  __shared__ float sfx, sfy, scx, scy;
+  __shared__ float tfx, tfy, tcx, tcy;
+  __shared__ float te[3], qe[4];
 
+  if (threadIdx.x == 0) {
+    // load intrinsics (assumed single set each; index 0, like your other kernel)
+    sfx = src_intr[0][0];  sfy = src_intr[0][1];  scx = src_intr[0][2];  scy = src_intr[0][3];
+    tfx = tgt_intr[0][0];  tfy = tgt_intr[0][1];  tcx = tgt_intr[0][2];  tcy = tgt_intr[0][3];
+
+    // load left->right extrinsic: (tx,ty,tz, qx,qy,qz,qw)
+    te[0] = extrinsic[0]; te[1] = extrinsic[1]; te[2] = extrinsic[2];
+    qe[0] = extrinsic[3]; qe[1] = extrinsic[4]; qe[2] = extrinsic[5]; qe[3] = extrinsic[6];
+  }
+  __syncthreads();
+
+  GPU_1D_KERNEL_LOOP(n, ii.size(0)) {
+    const int ix = ii[n];
+    const int jx = jj[n];
+    const int kx = kk[n];
+
+    // source (left) pose i
+    float ti[3] = { poses[ix][0], poses[ix][1], poses[ix][2] };
+    float qi[4] = { poses[ix][3], poses[ix][4], poses[ix][5], poses[ix][6] };
+
+    // target base pose j (left)
+    float tjL[3] = { poses[jx][0], poses[jx][1], poses[jx][2] };
+    float qjL[4] = { poses[jx][3], poses[jx][4], poses[jx][5], poses[jx][6] };
+
+    // compose to right camera: poses_right[j] = extrinsic * poses[j]
+    float tjR[3], qjR[4];
+    actSE3Fully(te, qe, tjL, qjL, tjR, qjR);
+
+    // relative transform Gij: from source i (left) to target j (right)
+    float tij[3], qij[4];
+    relSE3(ti, qi, tjR, qjR, tij, qij);
+
+    // per-pixel backproject with SOURCE intrinsics, transform, project with TARGET intrinsics
+    float Xi[4], Xj[4];
+
+    for (int u=0; u<patches.size(2); ++u) {
+      for (int v=0; v<patches.size(3); ++v) {
+
+        // patches[kx] channels: [x, y, depth]
+        const float px = patches[kx][0][u][v];
+        const float py = patches[kx][1][u][v];
+        const float dz = patches[kx][2][u][v];
+
+        // backproject in source camera
+        Xi[0] = (px - scx) / sfx;
+        Xi[1] = (py - scy) / sfy;
+        Xi[2] = 1.0f;
+        Xi[3] = dz;
+
+        // SE3 action
+        actSE3(tij, qij, Xi, Xj);
+
+        // project in target camera
+        const float invz = 1.0f / fmaxf(Xj[2], 0.1f);
+        coords[n][0][u][v] = tfx * (Xj[0] * invz) + tcx;
+        coords[n][1][u][v] = tfy * (Xj[1] * invz) + tcy;
+      }
+    }
+  }
+}
 
 std::vector<torch::Tensor> cuda_ba(
     torch::Tensor poses,
@@ -746,6 +823,8 @@ torch::Tensor cuda_reproject(
     torch::Tensor jj, 
     torch::Tensor kk)
 {
+  const at::cuda::CUDAGuard device_guard(poses.get_device());
+  auto stream = at::cuda::getCurrentCUDAStream();
 
   const int N = ii.size(0);
   const int P = patches.size(3); // patch size
@@ -759,7 +838,7 @@ torch::Tensor cuda_reproject(
 
   torch::Tensor coords = torch::empty({N, 2, P, P}, opts);
 
-  reproject<<<NUM_BLOCKS(N), NUM_THREADS>>>(
+  reproject<<<NUM_BLOCKS(N), NUM_THREADS, 0, stream.stream()>>>(
     poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
     patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
     intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
@@ -767,7 +846,47 @@ torch::Tensor cuda_reproject(
     jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
     kk.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
     coords.packed_accessor32<float,4,torch::RestrictPtrTraits>());
-
+  
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
   return coords.view({1, N, 2, P, P});
+}
 
+torch::Tensor cuda_reproject_s(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor source_intrinsics,
+    torch::Tensor target_intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    torch::Tensor extrinsic)
+{
+  const at::cuda::CUDAGuard device_guard(poses.get_device());
+  auto stream = at::cuda::getCurrentCUDAStream();
+
+  const int N = ii.size(0);
+  const int P = patches.size(3); // patch size
+
+  poses = poses.view({-1, 7});
+  patches = patches.view({-1, 3, P, P});
+  source_intrinsics = source_intrinsics.view({-1, 4});
+  target_intrinsics = target_intrinsics.view({-1, 4});
+  extrinsic = extrinsic.view({7}); // (tx,ty,tz,qx,qy,qz,qw)
+
+  auto opts = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+  torch::Tensor coords = torch::empty({N, 2, P, P}, opts);
+
+  reproject_s<<<NUM_BLOCKS(N), NUM_THREADS, 0, stream.stream()>>>(
+      poses.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      patches.packed_accessor32<float,4,torch::RestrictPtrTraits>(),
+      source_intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      target_intrinsics.packed_accessor32<float,2,torch::RestrictPtrTraits>(),
+      ii.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      jj.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      kk.packed_accessor32<long,1,torch::RestrictPtrTraits>(),
+      extrinsic.packed_accessor32<float,1,torch::RestrictPtrTraits>(),
+      coords.packed_accessor32<float,4,torch::RestrictPtrTraits>());
+  
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return coords.view({1, N, 2, P, P});
 }

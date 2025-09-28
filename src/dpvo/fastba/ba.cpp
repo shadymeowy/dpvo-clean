@@ -33,6 +33,16 @@ torch::Tensor cuda_reproject(
     torch::Tensor jj, 
     torch::Tensor kk);
 
+torch::Tensor cuda_reproject_s(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor source_intrinsics,
+    torch::Tensor target_intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    torch::Tensor extrinsic);
+
 std::vector<torch::Tensor> ba(
     torch::Tensor poses,
     torch::Tensor patches,
@@ -62,6 +72,17 @@ torch::Tensor reproject(
   return cuda_reproject(poses, patches, intrinsics, ii, jj, kk);
 }
 
+torch::Tensor reproject_s(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor source_intrinsics,
+    torch::Tensor target_intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    torch::Tensor extrinsic) {
+  return cuda_reproject_s(poses, patches, source_intrinsics, target_intrinsics, ii, jj, kk, extrinsic);
+}
 
 std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
 {
@@ -183,14 +204,12 @@ std::vector<torch::Tensor> solve_system(torch::Tensor J_Ginv_i, torch::Tensor J_
   dense_J_tensor.resize_({r, 7, n, 7});
 
   return {delta_tensor, dense_J_tensor};
-
 }
-
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &ba, "BA forward operator");
   m.def("neighbors", &neighbors, "temporal neighboor indicies");
   m.def("reproject", &reproject, "temporal neighboor indicies");
+  m.def("reproject_s", &reproject_s, "stereo reproject");
   m.def("solve_system", &solve_system, "temporal neighboor indicies");
-
 }
