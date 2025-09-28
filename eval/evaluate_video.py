@@ -126,7 +126,7 @@ def main():
         "--intrinsics_2",
         type=float,
         nargs=4,
-        default=[1066.9900, 1067.5900, 958.8900, 551.0580]
+        default=[1066.9900, 1067.5900, 958.8900, 551.0580],
         help="fx fy cx cy",
     )
     parser.add_argument(
@@ -146,7 +146,7 @@ def main():
         "--intrinsics_1",
         type=float,
         nargs=4,
-        default=[1067.6400, 1067.7000, 919.6100, 501.5940]
+        default=[1067.6400, 1067.7000, 919.6100, 501.5940],
         help="fx fy cx cy",
     )
     parser.add_argument(
