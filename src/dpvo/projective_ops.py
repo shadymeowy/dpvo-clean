@@ -225,3 +225,36 @@ def flow_mag(poses, patches, intrinsics, ii, jj, kk, beta=0.3):
     flow2 = (coords2 - coords0).norm(dim=-1)
 
     return beta * flow1 + (1 - beta) * flow2, (val > 0.5)
+
+
+def reproject(poses, patches, intrinsics, ii, jj, kk):
+    coords = transform(SE3(poses), patches, intrinsics, ii, jj, kk)
+    coords = coords.permute(0, 1, 4, 2, 3).contiguous()
+    return coords
+
+
+def reproject_s(
+    poses,
+    patches,
+    source_intrinsics,
+    target_intrinsics,
+    ii,
+    jj,
+    kk,
+    extrinsics,
+):
+    left_to_right = SE3(extrinsics.unsqueeze(1))
+    poses_right = left_to_right * SE3(poses)
+
+    coords = transform_s(
+        source_poses=SE3(poses),
+        target_poses=poses_right,
+        patches=patches,
+        source_intrinsics=source_intrinsics,
+        target_intrinsics=target_intrinsics,
+        ii=ii,
+        jj=jj,
+        kk=kk,
+    )
+    coords = coords.permute(0, 1, 4, 2, 3).contiguous()
+    return coords
