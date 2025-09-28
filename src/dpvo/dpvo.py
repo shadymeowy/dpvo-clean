@@ -331,8 +331,12 @@ class DPVO:
         with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             corr = self.corr(coords, indicies=(kk, jj))
             ctx = self.imap[:, kk % (self.M * self.pmem)]
-            net, (delta, weight, _) = self.network.update(
-                net, ctx, corr, None, ii, jj, kk
+
+            nix, njx = fastba.neighbors(kk, jj)
+            ukk = torch.unique(kk, return_inverse=True)[1]
+            ujk = torch.unique(ii * 12345 + jj, return_inverse=True)[1]
+            net, delta, weight = self.network.update(
+                net, ctx, corr, nix, njx, ukk, ujk
             )
 
         return torch.quantile(delta.norm(dim=-1).float(), 0.5)
@@ -384,8 +388,12 @@ class DPVO:
 
                     self.pg.intrinsics_s_[i] = self.pg.intrinsics_s_[i + 1]
 
-                    self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[0, (i + 1) % self.mem]
-                    self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[0, (i + 1) % self.mem]
+                    self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[
+                        0, (i + 1) % self.mem
+                    ]
+                    self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[
+                        0, (i + 1) % self.mem
+                    ]
 
                 self.n -= 1
                 self.m -= self.M
@@ -454,11 +462,16 @@ class DPVO:
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
 
-                self.pg.net, (delta, weight, _) = self.network.update(
-                    self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
+                nix, njx = fastba.neighbors(self.pg.kk, self.pg.jj)
+                ukk = torch.unique(self.pg.kk, return_inverse=True)[1]
+                ujk = torch.unique(
+                    self.pg.ii * 12345 + self.pg.jj, return_inverse=True
+                )[1]
+                self.pg.net, delta, weight = self.network.update(
+                    self.pg.net, ctx, corr, nix, njx, ukk, ujk
                 )
-                self.pg.net_s, (delta_s, weight_s, _) = self.network.update(
-                    self.pg.net_s, ctx, corr_s, None, self.pg.ii, self.pg.jj, self.pg.kk
+                self.pg.net_s, delta_s, weight_s = self.network.update(
+                    self.pg.net_s, ctx, corr_s, nix, njx, ukk, ujk
                 )
 
                 lmbda = torch.as_tensor([1e-4], device="cuda")

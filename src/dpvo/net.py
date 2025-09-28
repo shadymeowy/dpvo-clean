@@ -58,24 +58,41 @@ class Update(nn.Module):
             nn.ReLU(inplace=False), nn.Linear(dim, 2), GradientClip(), nn.Sigmoid()
         )
 
-    def forward(self, net, inp, corr, flow, ii, jj, kk):
+    def forward(self, net, inp, corr, nix, njx, ukk, ujk):
+        net_in = net
         """update operator"""
         net = net + inp + self.corr(corr)
         net = self.norm(net)
 
-        ix, jx = fastba.neighbors(kk, jj)
-        mask_ix = (ix >= 0).float().reshape(1, -1, 1)
-        mask_jx = (jx >= 0).float().reshape(1, -1, 1)
+        mask_ix = (nix >= 0).float().reshape(1, -1, 1)
+        mask_jx = (njx >= 0).float().reshape(1, -1, 1)
 
-        net = net + self.c1(mask_ix * net[:, ix])
-        net = net + self.c2(mask_jx * net[:, jx])
+        net = net + self.c1(mask_ix * net[:, nix])
+        net = net + self.c2(mask_jx * net[:, njx])
 
-        net = net + self.agg_kk(net, kk)
-        net = net + self.agg_ij(net, ii * 12345 + jj)
+        net = net + self.agg_kk(net, jx=ukk)
+        net = net + self.agg_ij(net, jx=ujk)
 
         net = self.gru(net)
 
-        return net, (self.d(net), self.w(net), None)
+        # DEBUG
+        import safetensors.torch
+        dct = {
+            "net_in": net_in.cpu(),
+            "net_out": net.cpu(),
+            "inp": inp.cpu(),
+            "corr": corr.cpu(),
+            "nix": nix.cpu(),
+            "njx": njx.cpu(),
+            "ukk": ukk.cpu(),
+            "ujk": ujk.cpu(),
+            "d": self.d(net).cpu(),
+            "w": self.w(net).cpu(),
+        }
+        safetensors.torch.save_file(dct, "/tmp/debug_update.safetensors")
+        # DEBUG END
+
+        return net, self.d(net), self.w(net)
 
 
 class ePatchifier(nn.Module):
@@ -293,7 +310,9 @@ class Patchifier(nn.Module):
             y = torch.randint(1, h - 1, size=[n, patches_per_image], device="cuda")
         elif centroid_sel_strat == "GRID":
             grid_size = int(np.sqrt(patches_per_image))
-            assert grid_size**2 == patches_per_image, "patches_per_image must be a perfect square"
+            assert grid_size**2 == patches_per_image, (
+                "patches_per_image must be a perfect square"
+            )
 
             # Size of each cell
             cell_w = (w + grid_size - 1) // grid_size
