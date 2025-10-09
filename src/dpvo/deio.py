@@ -167,7 +167,7 @@ class DEIO:
         self.is_init_VI = False  # Is visual-inertial initialized
 
         # Whether to perform visual estimation only. When cfg.ENALBE_IMU is False, only visual estimation is performed and visual_only is true. When cfg.ENALBE_IMU is True, visual_only is False.
-        self.visual_only = True
+        self.visual_only = False
         self.visual_only_init = False
 
         # True # Whether to perform high-frequency output
@@ -1130,7 +1130,7 @@ class DEIO:
         # Flag for completion of initialization
         self.is_initialized = True
 
-    def VisualIMUAlignment(self, t0, t1, ignore_lever, disable_scale=False):
+    def VisualIMUAlignment(self, t0, t1, ignore_lever, disable_scale=True):
         poses = SE3(self.pg.poses_)
         wTcs = poses.inv().matrix().cpu().numpy()
 

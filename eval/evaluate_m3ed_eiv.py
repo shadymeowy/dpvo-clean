@@ -142,8 +142,7 @@ def read_extrinsic_imu(path, imu_name, camera_name):
         T_imu = h5[f"{imu_name}/calib/T_to_prophesee_left"][()]
         T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
 
-    T_imu_to_camera = np.linalg.inv(T_camera) @ T_imu
-    T_imu_to_camera = np.linalg.inv(T_imu_to_camera)
+    T_imu_to_camera = T_camera @ np.linalg.inv(T_imu)
     return T_imu_to_camera
 
 
@@ -212,7 +211,7 @@ def main():
 
         slam.Ti1c = read_extrinsic_imu(args.data_h5, args.imu, args.camera)
         slam.Tbc = gtsam.Pose3(slam.Ti1c)
-        slam.state.set_imu_params([0.037, 0.008, 5e-05, 4e-06])
+        slam.state.set_imu_params([0.16, 0.05, 0.003, 4.0e-5])
         slam.all_imu = read_imu(args.data_h5, args.imu)
 
         generator1 = pgenerator(
@@ -294,7 +293,7 @@ def main():
         save_ply(scene, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics, H, W)
+        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics1, H, W)
 
     if args.save_point_cloud:
         os.makedirs("saved_point_clouds", exist_ok=True)
