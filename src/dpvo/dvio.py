@@ -1,10 +1,10 @@
-import bisect
 import copy
 import math
 
 import gtsam
 import numpy as np
 import torch
+import torch.multiprocessing as mp
 import torch.nn.functional as F
 from gtsam.symbol_shorthand import B, V, X
 from scipy.spatial.transform import Rotation
@@ -18,6 +18,9 @@ from .net import VONet
 from .patchgraph import PatchGraph
 from .utils import Timer, flatmeshgrid
 
+mp.set_start_method("spawn", True)
+
+autocast = torch.amp.autocast
 Id = SE3.Identity(1, device="cuda")
 
 
@@ -32,7 +35,7 @@ class DVIO:
         show=False,
         enable_timing=False,
         timing_file=None,
-        **kwargs,
+        extrinsics=np.array([0, 0, 0, 0, 0, 0, 1], dtype=np.float32),
     ):
         self.cfg = cfg
         self.load_weights(network)
@@ -53,6 +56,8 @@ class DVIO:
         DIM = self.DIM
         RES = self.RES
 
+        self.stereo = True
+
         ### state attributes ###
         self.tlist = []
         self.counter = 0
@@ -65,7 +70,6 @@ class DVIO:
 
         # dummy image for visualization
         self.image_ = torch.zeros(self.ht, self.wd, 3, dtype=torch.uint8, device="cpu")
-
         ### network attributes ###
         if self.cfg.MIXED_PRECISION:
             self.kwargs = kwargs = {"device": "cuda", "dtype": torch.half}
@@ -73,7 +77,7 @@ class DVIO:
             self.kwargs = kwargs = {"device": "cuda", "dtype": torch.float}
 
         ### frame memory size ###
-        self.pmem = self.mem = 36  # 32 was too small given default settings
+        self.pmem = self.mem = 36  # 32
         if self.cfg.LOOP_CLOSURE:
             self.last_global_ba = -1000  # keep track of time since last global opt
             self.pmem = self.cfg.MAX_EDGE_AGE  # patch memory
@@ -89,9 +93,15 @@ class DVIO:
 
         self.fmap1_ = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, **kwargs)
         self.fmap2_ = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, **kwargs)
+        self.fmap1_s_ = torch.zeros(1, self.mem, 128, ht // 1, wd // 1, **kwargs)
+        self.fmap2_s_ = torch.zeros(1, self.mem, 128, ht // 4, wd // 4, **kwargs)
 
         # feature pyramid
         self.pyramid = (self.fmap1_, self.fmap2_)
+        self.pyramid_s = (self.fmap1_s_, self.fmap2_s_)
+
+        extrinsics = torch.from_numpy(extrinsics).cuda()
+        self.extrinsics = extrinsics.view(1, 7).float()
 
         self.viewer = None
         if viz:
@@ -111,12 +121,14 @@ class DVIO:
         self.cur_ii = None
         self.cur_jj = None
         self.cur_kk = None
-        self.cur_target = None  # Stores all the optical flow under the current window
-        self.cur_weight = (
-            None  # Stores the weights of all the optical flow under the current window
-        )
+        # Stores all the optical flow under the current window
+        self.cur_target = None
+        # Stores the weights of all the optical flow under the current window
+        self.cur_weight = None
+        self.cur_target_s = None
+        self.cur_weight_s = None
 
-        self.imu_enabled = False  # Initialized to false, the IMU is not used during initialization until certain conditions are met (visual-inertial alignment is performed)
+        self.imu_enabled = False
         self.ignore_imu = False
 
         # IMU-Camera Extrinsics. extrinsics, need to be set in the main .py
@@ -133,10 +145,10 @@ class DVIO:
         self.init_bias_sigma = np.array([1.0, 1.0, 1.0, 0.1, 0.1, 0.1])
 
         # local optimization window
-        self.t0 = 0  # Starting frame index
-        self.t1 = (
-            0  # Ending frame index (should also be the index of the current input data)
-        )
+        # Starting frame index
+        self.t0 = 0
+        # Ending frame index (should also be the index of the current input data)
+        self.t1 = 0
 
         self.all_imu = None  # All IMU data (read in from the previous file)
         self.cur_imu_ii = 0  # The index of the current IMU data being processed
@@ -144,10 +156,11 @@ class DVIO:
         self.is_init_VI = False  # Is visual-inertial initialized
 
         # Whether to perform visual estimation only. When cfg.ENALBE_IMU is False, only visual estimation is performed and visual_only is true. When cfg.ENALBE_IMU is True, visual_only is False.
-        self.visual_only = False
+        self.visual_only = True
         self.visual_only_init = False
 
-        self.high_freq_output = False  # True # Whether to perform high-frequency output
+        # True # Whether to perform high-frequency output
+        self.high_freq_output = False
 
         # visualization/output
         self.plt_pos = [[], []]
@@ -157,15 +170,6 @@ class DVIO:
         self.refTw = np.eye(4, 4)
         self.poses_save = []
         # Record poses
-
-    def load_long_term_loop_closure(self):
-        try:
-            from .loop_closure.long_term import LongTermLoopClosure
-
-            self.long_term_lc = LongTermLoopClosure(self.cfg, self.pg)
-        except ModuleNotFoundError as e:
-            self.cfg.CLASSIC_LOOP_CLOSURE = False
-            print(f"WARNING: {e}")
 
     # Used to set prior_factor_map
     def set_prior(self, t0, t1):
@@ -217,15 +221,6 @@ class DVIO:
         self.network.cuda()
         self.network.eval()
 
-    def start_viewer(self):
-        from dpviewer import Viewer
-
-        intrinsics_ = torch.zeros(1, 4, dtype=torch.float32, device="cuda")
-
-        self.viewer = Viewer(
-            self.image_, self.pg.poses_, self.pg.points_, self.pg.colors_, intrinsics_
-        )
-
     @property
     def poses(self):
         return self.pg.poses_.view(1, self.N, 7)
@@ -237,6 +232,10 @@ class DVIO:
     @property
     def intrinsics(self):
         return self.pg.intrinsics_.view(1, self.N, 4)
+
+    @property
+    def intrinsics_s(self):
+        return self.pg.intrinsics_s_.view(1, self.N, 4)
 
     @property
     def ix(self):
@@ -315,30 +314,59 @@ class DVIO:
         corr2 = altcorr.corr(self.gmap, self.pyramid[1], coords / 4, ii1, jj1, 3)
         return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
 
+    def corr_s(self, coords, indicies=None):
+        """local correlation volume"""
+        ii, jj = indicies if indicies is not None else (self.pg.kk, self.pg.jj)
+        ii1 = ii % (self.M * self.pmem)
+        jj1 = jj % (self.mem)
+        corr1 = altcorr.corr(self.gmap, self.pyramid_s[0], coords / 1, ii1, jj1, 3)
+        corr2 = altcorr.corr(self.gmap, self.pyramid_s[1], coords / 4, ii1, jj1, 3)
+        return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
+
     def reproject(self, indicies=None):
         """reproject patch k from i -> j"""
         (ii, jj, kk) = (
             indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
         )
-        coords = pops.transform(
-            SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk
+        coords = fastba.reproject(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            ii,
+            jj,
+            kk,
         )
-        return coords.permute(0, 1, 4, 2, 3).contiguous()
+        return coords
+
+    def reproject_s(self, indicies=None):
+        """reproject patch k from i -> j"""
+        (ii, jj, kk) = (
+            indicies if indicies is not None else (self.pg.ii, self.pg.jj, self.pg.kk)
+        )
+        coords = fastba.reproject_s(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            self.intrinsics_s,
+            ii,
+            jj,
+            kk,
+            self.extrinsics,
+        )
+        return coords
 
     def append_factors(self, ii, jj):
         self.pg.jj = torch.cat([self.pg.jj, jj])
         self.pg.kk = torch.cat([self.pg.kk, ii])
-        # The inserted ii is actually the patch index, kk
         self.pg.ii = torch.cat([self.pg.ii, self.ix[ii]])
-        # self.ix[ii], which is self.ix[kk], is the index of ii
 
         net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         self.pg.net = torch.cat([self.pg.net, net], dim=1)
+        self.pg.net_s = torch.cat([self.pg.net_s, net], dim=1)
 
     def remove_factors(self, m, store: bool):
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
         if store:
-            # If store is True, the edges to be deleted are stored in inactive edges
             self.pg.ii_inac = torch.cat((self.pg.ii_inac, self.pg.ii[m]))
             self.pg.jj_inac = torch.cat((self.pg.jj_inac, self.pg.jj[m]))
             self.pg.kk_inac = torch.cat((self.pg.kk_inac, self.pg.kk[m]))
@@ -348,13 +376,23 @@ class DVIO:
             self.pg.target_inac = torch.cat(
                 (self.pg.target_inac, self.pg.target[:, m]), dim=1
             )
+            self.pg.weight_s_inac = torch.cat(
+                (self.pg.weight_s_inac, self.pg.weight_s[:, m]), dim=1
+            )
+            self.pg.target_s_inac = torch.cat(
+                (self.pg.target_s_inac, self.pg.target_s[:, m]), dim=1
+            )
         self.pg.weight = self.pg.weight[:, ~m]
         self.pg.target = self.pg.target[:, ~m]
+
+        self.pg.weight_s = self.pg.weight_s[:, ~m]
+        self.pg.target_s = self.pg.target_s[:, ~m]
 
         self.pg.ii = self.pg.ii[~m]
         self.pg.jj = self.pg.jj[~m]
         self.pg.kk = self.pg.kk[~m]
         self.pg.net = self.pg.net[:, ~m]
+        self.pg.net_s = self.pg.net_s[:, ~m]
         assert self.pg.ii.numel() == self.pg.weight.shape[1]
 
     def motion_probe(self):
@@ -366,7 +404,7 @@ class DVIO:
         net = torch.zeros(1, len(ii), self.DIM, **self.kwargs)
         coords = self.reproject(indicies=(ii, jj, kk))
 
-        with torch.amp.autocast("cuda", enabled=self.cfg.MIXED_PRECISION):
+        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             corr = self.corr(coords, indicies=(kk, jj))
             ctx = self.imap[:, kk % (self.M * self.pmem)]
             net, (delta, weight, _) = self.network.update(
@@ -381,107 +419,116 @@ class DVIO:
         jj = self.pg.jj[k]
         kk = self.pg.kk[k]
 
-        flow, _ = pops.flow_mag(
-            SE3(self.poses), self.patches, self.intrinsics, ii, jj, kk, beta=0.5
-        )
-        return flow.mean().item()
+        mag = fastba.motionmag(
+            self.poses,
+            self.patches,
+            self.intrinsics,
+            ii,
+            jj,
+            kk,
+        ).item()
+
+        return mag
 
     def keyframe(self):
-        i = self.n - self.cfg.KEYFRAME_INDEX - 1  # The 5th to last frame
-        j = self.n - self.cfg.KEYFRAME_INDEX + 1  # The 3rd to last frame
-        m = self.motionmag(i, j) + self.motionmag(j, i)
+        with Timer("keyframe", enabled=self.enable_timing, file=self.timing_file):
+            i = self.n - self.cfg.KEYFRAME_INDEX - 1
+            j = self.n - self.cfg.KEYFRAME_INDEX + 1
+            m = self.motionmag(i, j) + self.motionmag(j, i)
 
-        if m / 2 < self.cfg.KEYFRAME_THRESH:
-            # If motion is less than the threshold, it is not a keyframe
-            k = self.n - self.cfg.KEYFRAME_INDEX  # The 4th to last frame
-            t0 = self.pg.tstamps_[k - 1]
-            t1 = self.pg.tstamps_[k]
+            if m / 2 < self.cfg.KEYFRAME_THRESH:
+                k = self.n - self.cfg.KEYFRAME_INDEX
+                t0 = self.pg.tstamps_[k - 1].item()
+                t1 = self.pg.tstamps_[k].item()
 
-            dP = SE3(self.pg.poses_[k]) * SE3(self.pg.poses_[k - 1]).inv()
-            self.pg.delta[t1] = (t0, dP)
+                dP = SE3(self.pg.poses_[k]) * SE3(self.pg.poses_[k - 1]).inv()
+                self.pg.delta[t1] = (t0, dP)
 
-            to_remove = (self.pg.ii == k) | (self.pg.jj == k)
-            self.remove_factors(to_remove, store=False)
-            # This will not be stored, because the motion is not enough, so it's not a keyframe
+                to_remove = (self.pg.ii == k) | (self.pg.jj == k)
+                self.remove_factors(to_remove, store=False)
 
-            # Reduce the indices after k
-            self.pg.kk[self.pg.ii > k] -= self.M
-            self.pg.ii[self.pg.ii > k] -= 1
-            self.pg.jj[self.pg.jj > k] -= 1
+                self.pg.kk[self.pg.ii > k] -= self.M
+                self.pg.ii[self.pg.ii > k] -= 1
+                self.pg.jj[self.pg.jj > k] -= 1
 
-            # Perform data movement (from k to the current frame)
-            for i in range(k, self.n - 1):
-                self.pg.tstamps_[i] = self.pg.tstamps_[i + 1]
-                self.pg.colors_[i] = self.pg.colors_[i + 1]
-                self.pg.poses_[i] = self.pg.poses_[i + 1]
-                self.pg.patches_[i] = self.pg.patches_[i + 1]
-                self.images[i] = self.images[i + 1]
-                self.pg.intrinsics_[i] = self.pg.intrinsics_[i + 1]
+                for i in range(k, self.n - 1):
+                    self.pg.tstamps_[i] = self.pg.tstamps_[i + 1]
+                    self.pg.colors_[i] = self.pg.colors_[i + 1]
+                    self.pg.poses_[i] = self.pg.poses_[i + 1]
+                    self.pg.patches_[i] = self.pg.patches_[i + 1]
+                    self.images[i] = self.images[i + 1]
+                    self.pg.intrinsics_[i] = self.pg.intrinsics_[i + 1]
 
-                self.imap_[i % self.pmem] = self.imap_[(i + 1) % self.pmem]
-                self.gmap_[i % self.pmem] = self.gmap_[(i + 1) % self.pmem]
-                self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
-                self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
+                    self.imap_[i % self.pmem] = self.imap_[(i + 1) % self.pmem]
+                    self.gmap_[i % self.pmem] = self.gmap_[(i + 1) % self.pmem]
+                    self.fmap1_[0, i % self.mem] = self.fmap1_[0, (i + 1) % self.mem]
+                    self.fmap2_[0, i % self.mem] = self.fmap2_[0, (i + 1) % self.mem]
 
-                # IMU data movement
-                if i == k:
-                    for iii in range(len(self.state.preintegrations_meas[i])):
-                        dd = self.state.preintegrations_meas[i][iii]
-                        # Get the IMU information of the kth frame (Acc, Omega, Delta_t, t)
-                        if dd[2] > 0:
-                            self.state.preintegrations[i - 1].integrateMeasurement(
-                                dd[0], dd[1], dd[2]
-                            )
+                    self.pg.intrinsics_s_[i] = self.pg.intrinsics_s_[i + 1]
 
-                        self.state.preintegrations_meas[i - 1].append(dd)
-                    self.state.preintegrations.pop(i)
-                    self.state.preintegrations_meas.pop(i)
+                    self.fmap1_s_[0, i % self.mem] = self.fmap1_s_[
+                        0, (i + 1) % self.mem
+                    ]
+                    self.fmap2_s_[0, i % self.mem] = self.fmap2_s_[
+                        0, (i + 1) % self.mem
+                    ]
 
-                    self.state.wTbs.pop(i)
-                    self.state.bs.pop(i)
-                    self.state.vs.pop(i)
+                    # IMU data movement
+                    if i == k:
+                        for iii in range(len(self.state.preintegrations_meas[i])):
+                            dd = self.state.preintegrations_meas[i][iii]
+                            # Get the IMU information of the kth frame (Acc, Omega, Delta_t, t)
+                            if dd[2] > 0:
+                                self.state.preintegrations[i - 1].integrateMeasurement(
+                                    dd[0], dd[1], dd[2]
+                                )
 
-            self.n -= 1  # Since one frame is deleted, move one frame forward
-            self.m -= self.M
-            # Subtract these patches to get the total number of patches
+                            self.state.preintegrations_meas[i - 1].append(dd)
+                        self.state.preintegrations.pop(i)
+                        self.state.preintegrations_meas.pop(i)
 
-            if self.cfg.CLASSIC_LOOP_CLOSURE:
-                self.long_term_lc.keyframe(k)
+                        self.state.wTbs.pop(i)
+                        self.state.bs.pop(i)
+                        self.state.vs.pop(i)
 
-        # When ii is 22 frames before the current frame, remove it
-        # Remove edges falling outside the optimization window
-        to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
-        if self.cfg.LOOP_CLOSURE:
-            # ...unless they are being used for loop closure
-            lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
-                self.pg.jj > (self.n - self.cfg.OPTIMIZATION_WINDOW)
-            )
-            to_remove = to_remove & ~lc_edges
-        self.remove_factors(to_remove, store=True)
-        # This needs to be stored, because it is a keyframe, but it has slid out of the window
+                self.n -= 1
+                self.m -= self.M
 
-    # Global BA optimization
+                if self.cfg.CLASSIC_LOOP_CLOSURE:
+                    self.long_term_lc.keyframe(k)
+
+            to_remove = self.ix[self.pg.kk] < self.n - self.cfg.REMOVAL_WINDOW
+            if self.cfg.LOOP_CLOSURE:
+                # ...unless they are being used for loop closure
+                lc_edges = ((self.pg.jj - self.pg.ii) > 30) & (
+                    self.pg.jj > (self.n - self.cfg.OPTIMIZATION_WINDOW)
+                )
+                to_remove = to_remove & ~lc_edges
+            self.remove_factors(to_remove, store=True)
+
     def __run_global_BA(self):
         """Global bundle adjustment
         Includes both active and inactive edges"""
         full_target = torch.cat((self.pg.target_inac, self.pg.target), dim=1)
         full_weight = torch.cat((self.pg.weight_inac, self.pg.weight), dim=1)
+        full_target_s = torch.cat((self.pg.target_s_inac, self.pg.target_s), dim=1)
+        full_weight_s = torch.cat((self.pg.weight_s_inac, self.pg.weight_s), dim=1)
         full_ii = torch.cat((self.pg.ii_inac, self.pg.ii))
         full_jj = torch.cat((self.pg.jj_inac, self.pg.jj))
         full_kk = torch.cat((self.pg.kk_inac, self.pg.kk))
 
-        # self.pg.normalize()#! normalization, what is the purpose?
         lmbda = torch.as_tensor([1e-4], device="cuda")
-        # Given value, unlike droid which needs to be calculated
         t0 = self.pg.ii.min().item()
-        # It seems that it just adds global edges, and target weight and other information, and then performs global BA optimization, is there no big difference?
-        # The main difference should be that eff_impl=False was used before, and eff_impl=True is used here
         fastba.BA(
             self.poses,
             self.patches,
             self.intrinsics,
+            self.intrinsics_s,
+            self.extrinsics,
             full_target,
             full_weight,
+            full_target_s,
+            full_weight_s,
             lmbda,
             full_ii,
             full_jj,
@@ -491,6 +538,7 @@ class DVIO:
             M=self.M,
             iterations=2,
             eff_impl=True,
+            stereo=self.stereo,
         )
         self.ran_global_ba[self.n] = True
 
@@ -541,17 +589,24 @@ class DVIO:
                     # The visual factors to be marginalized
                     marg_target = self.cur_target[:, marg_idx]
                     marg_weight = self.cur_weight[:, marg_idx]
+                    marg_target_s = self.cur_target_s[:, marg_idx]
+                    marg_weight_s = self.cur_weight_s[:, marg_idx]
 
                     # Next, add the visual factors for marginalization
                     bafactor = fastba.BAFactor()
                     # Initialize the class, ready to build visual factors
-                    # It needs to be confirmed that what is obtained are marg_target, marg_weight, marg_ii, marg_jj, marg_t0, marg_t1
+                    # It needs to be confirmed that what is obtained are
+                    # marg_target, marg_weight, marg_target_s, marg_weight_s, marg_ii, marg_jj, marg_t0, marg_t1
                     bafactor.init(
                         self.poses.data,
                         self.patches,
                         self.intrinsics,
+                        self.intrinsics_s,
+                        self.extrinsics,
                         marg_target,
                         marg_weight,
+                        marg_target_s,
+                        marg_weight_s,
                         lmbda,
                         marg_ii,
                         marg_jj,
@@ -561,6 +616,7 @@ class DVIO:
                         marg_t1,
                         2,
                         eff_impl,
+                        self.stereo,
                     )
                     H = torch.zeros(
                         [(marg_t1 - marg_t0) * 6, (marg_t1 - marg_t0) * 6],
@@ -698,6 +754,8 @@ class DVIO:
         self.cur_kk = kk  # [active_index]
         self.cur_target = target  # [:,active_index]
         self.cur_weight = weight  # [:,active_index]
+        self.cur_target_s = target  # [:,active_index]
+        self.cur_weight_s = weight  # [:,active_index]
 
         # Next, start building visual constraint factors and put them into the gtsam graph
         H = torch.zeros(
@@ -710,15 +768,16 @@ class DVIO:
         bafactor = fastba.BAFactor()
         # Initialize the class, ready to build visual factors
         # Perform initialization
-        # bafactor.init(self.poses.data, self.patches, self.intrinsics,
-        #     target, weight, lmbda, ii, jj, kk, self.M, t0, t1, 2) # Note that keywords should not be written into the cuda code
-        # ! The following is correct
         bafactor.init(
             self.poses.data,
             self.patches,
             self.intrinsics,
+            self.intrinsics_s,
+            self.extrinsics,
             self.cur_target,
             self.cur_weight,
+            self.cur_target_s,
+            self.cur_weight_s,
             lmbda,
             self.cur_ii,
             self.cur_jj,
@@ -728,6 +787,7 @@ class DVIO:
             t1,
             2,
             eff_impl,
+            self.stereo,
         )
 
         """ multi-sensor DBA iterations """
@@ -783,37 +843,45 @@ class DVIO:
     def update(self):
         with Timer("reproject", enabled=self.enable_timing, file=self.timing_file):
             coords = self.reproject()
+            coords_s = self.reproject_s()
 
-        with torch.amp.autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
+        with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
             with Timer("corr", enabled=self.enable_timing, file=self.timing_file):
                 corr = self.corr(coords)
+                corr_s = self.corr_s(coords_s)
+
             with Timer("gru", enabled=self.enable_timing, file=self.timing_file):
                 ctx = self.imap[:, self.pg.kk % (self.M * self.pmem)]
+
                 self.pg.net, (delta, weight, _) = self.network.update(
                     self.pg.net, ctx, corr, None, self.pg.ii, self.pg.jj, self.pg.kk
                 )
+                self.pg.net_s, (delta_s, weight_s, _) = self.network.update(
+                    self.pg.net_s, ctx, corr_s, None, self.pg.ii, self.pg.jj, self.pg.kk
+                )
 
-        lmbda = torch.as_tensor([1e-4], device="cuda")
-        weight = weight.float()
-        target = coords[..., self.P // 2, self.P // 2] + delta.float()
+                lmbda = torch.as_tensor([1e-4], device="cuda")
+                weight = weight.float()
+                target = coords[..., self.P // 2, self.P // 2] + delta.float()
+
+                weight_s = weight_s.float()
+                target_s = coords_s[..., self.P // 2, self.P // 2] + delta_s.float()
 
         self.pg.target = target
         self.pg.weight = weight
+        self.pg.target_s = target_s
+        self.pg.weight_s = weight_s
 
-        # Perform BA optimization
         with Timer("ba", enabled=self.enable_timing, file=self.timing_file):
             try:
                 if self.imu_enabled:
-                    # If using imu
                     t1 = self.n
                     eff_impl_flag = False
 
-                    # Decide t0, full_target, full_weight, full_ii, full_jj, full_kk, eff_impl_flag based on different situations
                     if (
                         self.pg.ii < self.n - self.cfg.REMOVAL_WINDOW - 1
                     ).any() and not self.ran_global_ba[self.n]:
-                        # If there are values in ii less than n-REMOVAL_WINDOW-1 (i.e., there is a loop closure match), and the current frame has not run global BA optimization, then run global BA optimization
-                        eff_impl_flag = True  # Use an efficient implementation for global BA optimization
+                        eff_impl_flag = True
                         full_target = torch.cat(
                             (self.pg.target_inac, self.pg.target), dim=1
                         )
@@ -824,13 +892,8 @@ class DVIO:
                         full_jj = torch.cat((self.pg.jj_inac, self.pg.jj))
                         full_kk = torch.cat((self.pg.kk_inac, self.pg.kk))
 
-                        # self.pg.normalize()#! normalization, what is the purpose?
                         t0 = self.pg.ii.min().item()
-
-                        self.ran_global_ba[self.n] = (
-                            True  # Mark that the current frame has run global BA optimization
-                        )
-
+                        self.ran_global_ba[self.n] = True
                     else:
                         # Run local BA optimization
                         t0 = (
@@ -844,8 +907,7 @@ class DVIO:
                         full_ii = self.pg.ii
                         full_jj = self.pg.jj
                         full_kk = self.pg.kk
-                        eff_impl_flag = False  # Use an inefficient implementation for local BA optimization
-
+                        eff_impl_flag = False
                     self.__run_DBA(
                         target=full_target,
                         weight=full_weight,
@@ -858,15 +920,11 @@ class DVIO:
                         eff_impl=eff_impl_flag,
                     )
                 else:
-                    # Run global BA optimization
-                    # run global bundle adjustment if there exist long-range edges
                     if (
                         self.pg.ii < self.n - self.cfg.REMOVAL_WINDOW - 1
                     ).any() and not self.ran_global_ba[self.n]:
-                        # If there are values in ii less than n-REMOVAL_WINDOW-1 (i.e., there is a loop closure match), and the current frame has not run global BA optimization, then run global BA optimization
                         self.__run_global_BA()
                     else:
-                        # Run local BA optimization
                         t0 = (
                             self.n - self.cfg.OPTIMIZATION_WINDOW
                             if self.is_initialized
@@ -877,8 +935,12 @@ class DVIO:
                             self.poses,
                             self.patches,
                             self.intrinsics,
+                            self.intrinsics_s,
+                            self.extrinsics,
                             target,
                             weight,
+                            target_s,
+                            weight_s,
                             lmbda,
                             self.pg.ii,
                             self.pg.jj,
@@ -888,13 +950,12 @@ class DVIO:
                             M=self.M,
                             iterations=2,
                             eff_impl=False,
+                            stereo=self.stereo,
                         )
-                        # Additional records are needed
                         self.last_t0 = t0
                         self.last_t1 = self.n
-
-            except Exception as _:
-                print("Warning BA failed...")
+            except Exception as e:
+                print("Warning BA failed...", e)
 
             # Update point cloud
             points = pops.point_cloud(
@@ -933,7 +994,6 @@ class DVIO:
         )
 
     def __edges_forw(self):
-        # default: 13
         r = self.cfg.PATCH_LIFETIME
         t0 = self.M * max((self.n - r), 0)
         t1 = self.M * max((self.n - 1), 0)
@@ -944,7 +1004,6 @@ class DVIO:
         )
 
     def __edges_back(self):
-        # default: 13
         r = self.cfg.PATCH_LIFETIME
         t0 = self.M * max((self.n - 1), 0)
         t1 = self.M * max((self.n - 0), 0)
@@ -1042,7 +1101,7 @@ class DVIO:
 
         # The following is to update the graph
         self.imu_enabled = False  # The imu is not used for graph updates here
-        for itr in range(12):
+        for _ in range(12):
             self.update()
 
         # initialization complete Mark initialization as successful
@@ -1110,7 +1169,6 @@ class DVIO:
                     pim.integrateMeasurement(dd[0], dd[1], dd[2])
             self.state.preintegrations[i] = pim
             self.state.bs[i] = gtsam.imuBias.ConstantBias(np.array([0.0, 0.0, 0.0]), bg)
-        print("bg: ", bg)
 
         # linearAlignment
         all_frame_count = t1 - t0
@@ -1225,7 +1283,6 @@ class DVIO:
             g0 = g0 + np.matmul(lxly, dg)
             g0 = g0 / np.linalg.norm(g0) * 9.81
             s = x[-1] / 100.0
-        print(s, g0, x)
 
         if disable_scale:
             s = 1.0
@@ -1456,7 +1513,7 @@ class DVIO:
             and self.tlist[-1] >= self.cfg.VI_WARM_UP_T
         ):
             # The number of frames is greater than 12 and the initialization time is less than 0
-            if self.visual_only == 1:
+            if self.visual_only:
                 # IMU is not used, this is a passed parameter
                 self.visual_only_init = True
             else:
@@ -1465,15 +1522,15 @@ class DVIO:
 
         # End of processing the current frame
 
-    def __call__(self, tstamp, image, intrinsics, scale=1.0):
+    def __call__(self, tstamp, images, intrinsics):
         """track new frame"""
-
         # Create a copy of the current frame
-        current_frame = image.clone()
+        image_p = images[0]
+        image_s = images[1]
+        current_frame = image_p.clone()
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:
-            # If classic loop closure (i.e., image matching) is enabled
-            self.long_term_lc(image, self.n)
+            self.long_term_lc(image_p, self.n)
 
         if (self.n + 1) >= self.N:
             raise Exception(
@@ -1481,31 +1538,27 @@ class DVIO:
             )
 
         if self.viewer is not None:
-            self.viewer.update_image(image.contiguous())
+            self.viewer.update_image(image_p.contiguous())
 
-        # if self.viz_flow:
-        #     self.image_ = image.detach().cpu().permute((1, 2, 0)).numpy()
+        image_p = 2 * (image_p[None, None] / 255.0) - 0.5
+        image_s = 2 * (image_s[None, None] / 255.0) - 0.5
 
-        image = 2 * (image[None, None] / 255.0) - 0.5
-
-        # TODO patches with depth is available
         with Timer("patchify", enabled=self.enable_timing, file=self.timing_file):
-            with torch.amp.autocast(
-                device_type="cuda", enabled=self.cfg.MIXED_PRECISION
-            ):
+            with autocast(device_type="cuda", enabled=self.cfg.MIXED_PRECISION):
                 fmap, gmap, imap, patches, _, clr = self.network.patchify(
-                    image,
+                    image_p,
                     patches_per_image=self.cfg.PATCHES_PER_FRAME,
                     centroid_sel_strat=self.cfg.CENTROID_SEL_STRAT,
                     return_color=True,
                 )
 
+                fmap_s = self.network.patchify.fnet(image_s) / 4.0
+
         ### update state attributes ###
         self.tlist.append(tstamp)
-        # Timestamp, global time timestamp
         self.pg.tstamps_[self.n] = self.counter
-        # Just a number, the index of the global time corresponding to the keyframe is counted
-        self.pg.intrinsics_[self.n] = intrinsics / self.RES
+        self.pg.intrinsics_[self.n] = intrinsics[0] / self.RES
+        self.pg.intrinsics_s_[self.n] = intrinsics[1] / self.RES
 
         # color info for visualization
         clr = (clr[0, :, [2, 1, 0]] + 0.5) * (255.0 / 2)
@@ -1527,7 +1580,7 @@ class DVIO:
                 tvec_qvec = (SE3.exp(xi) * P1).data
                 self.pg.poses_[self.n] = tvec_qvec
             else:
-                tvec_qvec = self.poses[self.n - 1]
+                tvec_qvec = self.pg.poses_[self.n - 1]
                 self.pg.poses_[self.n] = tvec_qvec
 
         # TODO better depth initialization
@@ -1544,52 +1597,38 @@ class DVIO:
         self.gmap_[self.n % self.pmem] = gmap.squeeze()
         self.fmap1_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 1, 1)
         self.fmap2_[:, self.n % self.mem] = F.avg_pool2d(fmap[0], 4, 4)
+        self.fmap1_s_[:, self.n % self.mem] = F.avg_pool2d(fmap_s[0], 1, 1)
+        self.fmap2_s_[:, self.n % self.mem] = F.avg_pool2d(fmap_s[0], 4, 4)
 
         self.counter += 1
-
         if self.n > 0 and not self.is_initialized:
-            # Visual is not initialized yet
-            thres = 2.0 if scale == 1.0 else scale**2
-            # TODO adapt thres for lite version
-            if self.motion_probe() < thres:
-                # TODO: replace by 8 pixels flow criterion (as described in 3.3 Initialization)
+            if self.motion_probe() < 2.0:
                 self.pg.delta[self.counter - 1] = (self.counter - 2, Id[0])
                 return
 
-        self.n += 1  # add one (key)frame
-        self.m += self.M  # add patches per (key)frames to patch number
+        self.n += 1
+        self.m += self.M
 
         if self.cfg.LOOP_CLOSURE:
-            # If loop closure is enabled (this should be the loop closure implemented in DPVO)
             if self.n - self.last_global_ba >= self.cfg.GLOBAL_OPT_FREQ:
                 """ Add loop closure factors """
                 lii, ljj = self.pg.edges_loop()
-                # Get the edges for loop closure detection
                 if lii.numel() > 0:
-                    self.last_global_ba = self.n  # Mark the frame number of the last global BA optimization to control the frequency of global BA optimization
+                    self.last_global_ba = self.n
                     self.append_factors(lii, ljj)
-                    # Add the edges for loop closure detection
 
-        # relative pose
+        # Add forward and backward factors
         self.append_factors(*self.__edges_forw())
         self.append_factors(*self.__edges_back())
 
         if self.n == 8 and not self.is_initialized:
-            # Not initialized yet and meets 8 frames
             self.__initialize()
-        # Perform visual and inertial initialization
         elif self.is_initialized:
             self.VIO_update()
-            # Perform VIO update, which also includes the above two functions
 
         if self.cfg.CLASSIC_LOOP_CLOSURE:
-            # If classic loop closure is enabled
             self.long_term_lc.attempt_loop_closure(self.n)
-            # Attempt to perform loop closure
             self.long_term_lc.lc_callback()
-
-        # if self.viz_flow:
-        #     self.flow_viz_step()
 
 
 def CustomHessianFactor(values: gtsam.Values, H: np.ndarray, v: np.ndarray):

@@ -1,6 +1,5 @@
 import argparse
 import cProfile
-import multiprocessing as mp
 import os
 import pstats
 import time
@@ -16,6 +15,7 @@ from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
+from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
 from dpvo.config import cfg
@@ -111,6 +111,20 @@ def ev_generator(
         yield (t1_ms / 1e3, voxel, intrinsics_new)
 
 
+def read_extrinsic_cam(path, camera_name, camera2_name):
+    with h5py.File(path, "r") as h5:
+        T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
+        T_camera2 = h5[f"{camera2_name}/calib/T_to_prophesee_left"][()]
+
+    T_camera2_to_camera = T_camera @ np.linalg.inv(T_camera2)
+    # convert to [x, y, z, qx, qy, qz, qw]
+    r = R.from_matrix(T_camera2_to_camera[:3, :3])
+    q = r.as_quat()
+    T_camera2_to_camera = np.hstack((T_camera2_to_camera[:3, 3], q[[0, 1, 2, 3]]))
+
+    return T_camera2_to_camera
+
+
 def read_imu(path, imu_name):
     with h5py.File(path, "r") as h5:
         accel = h5[f"{imu_name}/accel"][()]
@@ -123,7 +137,7 @@ def read_imu(path, imu_name):
     return all_imu
 
 
-def read_extrinsic(path, imu_name, camera_name):
+def read_extrinsic_imu(path, imu_name, camera_name):
     with h5py.File(path, "r") as h5:
         T_imu = h5[f"{imu_name}/calib/T_to_prophesee_left"][()]
         T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
@@ -181,6 +195,9 @@ def main():
             resolution = f.get(f"{args.camera}/calib/resolution")[()] * args.scale
             H, W = int(resolution[1]), int(resolution[0])
             bins = 5
+        extrinsics = read_extrinsic_cam(
+            args.data_h5, args.camera, args.camera.replace("left", "right")
+        )
 
         slam = DEIO(
             cfg,
@@ -188,40 +205,57 @@ def main():
             ht=H,
             wd=W,
             show=args.show,
+            extrinsics=extrinsics,
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
 
-        slam.Ti1c = read_extrinsic(args.data_h5, args.imu, args.camera)
+        slam.Ti1c = read_extrinsic_imu(args.data_h5, args.imu, args.camera)
         slam.Tbc = gtsam.Pose3(slam.Ti1c)
         slam.state.set_imu_params([0.037, 0.008, 5e-05, 4e-06])
         slam.all_imu = read_imu(args.data_h5, args.imu)
 
-        mp.set_start_method("spawn")
+        generator1 = pgenerator(
+            ev_generator,
+            path=args.data_h5,
+            camera_name=args.camera,
+            period=args.period,
+            t_limits=(args.start, args.stop),
+            scale=args.scale,
+            bins=bins,
+            stride=args.stride,
+            size=10,
+        )
+        generator2 = pgenerator(
+            ev_generator,
+            path=args.data_h5,
+            camera_name=args.camera.replace("left", "right"),
+            period=args.period,
+            t_limits=(args.start, args.stop),
+            scale=args.scale,
+            bins=bins,
+            stride=args.stride,
+            size=10,
+        )
 
-        for i, (t, voxel, intrinsics) in enumerate(
-            pgenerator(
-                ev_generator,
-                path=args.data_h5,
-                camera_name=args.camera,
-                period=args.period,
-                t_limits=(args.start, args.stop),
-                scale=args.scale,
-                bins=bins,
-                stride=args.stride,
-                size=10,
-            )
+        for i, ((t1, voxel1, intrinsics1), (t2, voxel2, intrinsics2)) in enumerate(
+            zip(generator1, generator2, strict=False)
         ):
             if args.show:
-                img = voxel_to_img(voxel)
-                cv2.imshow("voxel", img)
+                image1 = voxel_to_img(voxel1)
+                image2 = voxel_to_img(voxel2)
+                concat = cv2.hconcat([image1, image2])
+                cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
-            voxel = torch.from_numpy(voxel).cuda()
-            intrinsics = torch.from_numpy(intrinsics).cuda()
+            voxel1 = torch.from_numpy(voxel1).cuda()
+            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
+
+            voxel2 = torch.from_numpy(voxel2).cuda()
+            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                slam(t, voxel, intrinsics)
+                slam(t1, (voxel1, voxel2), (intrinsics1, intrinsics2))
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)

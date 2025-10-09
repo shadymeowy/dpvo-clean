@@ -29,6 +29,7 @@ class PatchGraph:
             self.N, self.M, 3, self.P, self.P, dtype=torch.float, device="cuda"
         )
         self.intrinsics_ = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
+        self.intrinsics_s_ = torch.zeros(self.N, 4, dtype=torch.float, device="cuda")
 
         self.points_ = torch.zeros(self.N * self.M, 3, dtype=torch.float, device="cuda")
         self.colors_ = torch.zeros(self.N, self.M, 3, dtype=torch.uint8, device="cuda")
@@ -44,6 +45,7 @@ class PatchGraph:
 
         ### edge information ###
         self.net = torch.zeros(1, 0, DIM, **kwargs)
+        self.net_s = torch.zeros(1, 0, DIM, **kwargs)
         self.ii = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.jj = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.kk = torch.as_tensor([], dtype=torch.long, device="cuda")
@@ -54,6 +56,8 @@ class PatchGraph:
         self.kk_inac = torch.as_tensor([], dtype=torch.long, device="cuda")
         self.weight_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
         self.target_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
+        self.weight_s_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
+        self.target_s_inac = torch.zeros(1, 0, 2, dtype=torch.long, device="cuda")
 
     def edges_loop(self):
         """Adding edges from old patches to new frames"""
