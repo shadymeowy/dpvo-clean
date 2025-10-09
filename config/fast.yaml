@@ -15,7 +15,7 @@ MOTION_MODEL: 'DAMPED_LINEAR'
 MOTION_DAMPING: 0.5
 
 # maybe use mixed precision for inference
-MIXED_PRECISION: False
+MIXED_PRECISION: True
 
 CENTROID_SEL_STRAT: 'RANDOM'
 
