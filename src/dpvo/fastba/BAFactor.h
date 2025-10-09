@@ -11,14 +11,18 @@ public:
   void init(torch::Tensor poses,
             torch::Tensor patches,
             torch::Tensor intrinsics,
+            torch::Tensor intrinsics_s,
+            torch::Tensor extrinsics,
             torch::Tensor target,
             torch::Tensor weight,
+            torch::Tensor target_s,
+            torch::Tensor weight_s,
             torch::Tensor lmbda,
             torch::Tensor ii,
             torch::Tensor jj, 
             torch::Tensor kk,
             int PPF,
-            int t0, int t1, int iterations, bool eff_impl);
+            int t0, int t1, int iterations, bool eff_impl, bool stereo);
   void hessian(torch::Tensor Hgg, torch::Tensor vgg);
   std::vector<torch::Tensor> retract(torch::Tensor _dx);
   
@@ -26,8 +30,12 @@ public:
   torch::Tensor poses;
   torch::Tensor patches;
   torch::Tensor intrinsics;
+  torch::Tensor intrinsics_s;
+  torch::Tensor extrinsics;
   torch::Tensor target;
   torch::Tensor weight;
+  torch::Tensor target_s;
+  torch::Tensor weight_s;
   torch::Tensor lmbda;
   torch::Tensor ii;
   torch::Tensor jj;
@@ -36,6 +44,7 @@ public:
   int t0,t1;
 
   bool eff_impl;//=false;
+  bool stereo;
 
   torch::Tensor kx;
   torch::Tensor ku;

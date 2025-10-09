@@ -13,14 +13,18 @@ std::vector<torch::Tensor> cuda_ba(
     torch::Tensor poses,
     torch::Tensor patches,
     torch::Tensor intrinsics,
+    torch::Tensor intrinsics_s,
+    torch::Tensor extrinsics,
     torch::Tensor target,
     torch::Tensor weight,
+    torch::Tensor target_s,
+    torch::Tensor weight_s,
     torch::Tensor lmbda,
     torch::Tensor ii,
     torch::Tensor jj, 
     torch::Tensor kk,
     const int PPF,
-    int t0, int t1, int iterations, bool eff_impl);
+    int t0, int t1, int iterations, bool eff_impl, bool stereo);
 
 
 torch::Tensor cuda_reproject(
@@ -31,21 +35,43 @@ torch::Tensor cuda_reproject(
     torch::Tensor jj, 
     torch::Tensor kk);
 
+torch::Tensor cuda_reproject_s(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor source_intrinsics,
+    torch::Tensor target_intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    torch::Tensor extrinsic);
+
+torch::Tensor cuda_motionmag(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    double beta = 0.5);
+
 std::vector<torch::Tensor> ba(
     torch::Tensor poses,
     torch::Tensor patches,
     torch::Tensor intrinsics,
+    torch::Tensor intrinsics_s,
+    torch::Tensor extrinsics,
     torch::Tensor target,
     torch::Tensor weight,
+    torch::Tensor target_s,
+    torch::Tensor weight_s,
     torch::Tensor lmbda,
     torch::Tensor ii,
     torch::Tensor jj, 
     torch::Tensor kk,
     int PPF,
-    int t0, int t1, int iterations, bool eff_impl) {
-  return cuda_ba(poses, patches, intrinsics, target, weight, lmbda, ii, jj, kk, PPF, t0, t1, iterations, eff_impl);
+    int t0, int t1, int iterations, bool eff_impl, bool stereo) {
+  return cuda_ba(poses, patches, intrinsics, intrinsics_s, extrinsics, target, weight, target_s, weight_s, lmbda, ii, jj, kk, PPF, t0, t1, iterations, eff_impl, stereo);
 }
-
 
 torch::Tensor reproject(
     torch::Tensor poses,
@@ -57,6 +83,27 @@ torch::Tensor reproject(
   return cuda_reproject(poses, patches, intrinsics, ii, jj, kk);
 }
 
+torch::Tensor reproject_s(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor source_intrinsics,
+    torch::Tensor target_intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj,
+    torch::Tensor kk,
+    torch::Tensor extrinsic) {
+  return cuda_reproject_s(poses, patches, source_intrinsics, target_intrinsics, ii, jj, kk, extrinsic);
+}
+
+torch::Tensor motionmag(
+    torch::Tensor poses,
+    torch::Tensor patches,
+    torch::Tensor intrinsics,
+    torch::Tensor ii,
+    torch::Tensor jj, 
+    torch::Tensor kk) {
+  return cuda_motionmag(poses, patches, intrinsics, ii, jj, kk);
+}
 
 std::vector<torch::Tensor> neighbors(torch::Tensor ii, torch::Tensor jj)
 {
@@ -178,14 +225,14 @@ std::vector<torch::Tensor> solve_system(torch::Tensor J_Ginv_i, torch::Tensor J_
   dense_J_tensor.resize_({r, 7, n, 7});
 
   return {delta_tensor, dense_J_tensor};
-
 }
-
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &ba, "BA forward operator");
   m.def("neighbors", &neighbors, "temporal neighboor indicies");
   m.def("reproject", &reproject, "temporal neighboor indicies");
+  m.def("reproject_s", &reproject_s, "stereo reproject");
+  m.def("motionmag", &motionmag, "motion magnitude");
   m.def("solve_system", &solve_system, "temporal neighboor indicies");
 
   py::class_<BAFactor>(m, "BAFactor")
@@ -193,5 +240,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("init", &BAFactor::init)
       .def("hessian", &BAFactor::hessian)
       .def("retract", &BAFactor::retract);
-
 }
