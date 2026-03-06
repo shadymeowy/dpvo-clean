@@ -20,9 +20,9 @@ from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
     compute_remap,
-    to_voxel_grid_cuda,
     voxel_to_img,
 )
+from dpvo.voxel import to_voxel_grid_cuda
 from dpvo.parallel import pgenerator
 from dpvo.plot_utils import (
     plot_trajectory,
@@ -84,6 +84,8 @@ def ev_generator(
     print("duration", duration)
     print("number of events", len(t))
 
+    voxel = torch.zeros(bins + 1, H, W, device="cuda")
+
     for idx in tqdm(range(N1, N2, stride)):
         tperf = time.perf_counter()
         t0_ms = period * idx
@@ -114,10 +116,10 @@ def ev_generator(
 
         tperf = time.perf_counter()
 
-        voxel = to_voxel_grid_cuda(x_rect, y_rect, tb, tp, H, W, bins)
+        to_voxel_grid_cuda(voxel, x_rect, y_rect, tb, tp)
         print("to_voxel_grid time", time.perf_counter() - tperf)
 
-        yield ((t0_ms + t1_ms) / 2e3, voxel, intrinsics_new)
+        yield ((t0_ms + t1_ms) / 2e3, voxel[:-1], intrinsics_new)
 
 
 def read_extrinsic(path, camera_name, camera2_name):
@@ -224,15 +226,13 @@ def main():
             zip(generator1, generator2, strict=False)
         ):
             if args.show:
-                img1 = voxel_to_img(voxel1)
-                img2 = voxel_to_img(voxel2)
+                img1 = voxel_to_img(voxel1.cpu().numpy())
+                img2 = voxel_to_img(voxel2.cpu().numpy())
                 concat = cv2.hconcat([img1, img2])
                 cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
-            voxel1 = torch.from_numpy(voxel1).cuda()
             intrinsics1 = torch.from_numpy(intrinsics1).cuda()
-            voxel2 = torch.from_numpy(voxel2).cuda()
             intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
