@@ -1,5 +1,5 @@
 import torch
-import torchvision.transforms.functional as f
+
 
 
 def std(voxs, sequence=True):
@@ -109,6 +109,7 @@ def _augment(voxs, op=None, factor=None):
 
 
 def _aug_ops():
+    import torchvision.transforms.functional as f
     ops = [
         f.adjust_brightness,
         f.adjust_contrast,

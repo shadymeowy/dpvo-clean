@@ -4,7 +4,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchvision.ops import batched_nms
 
 from . import altcorr
 
@@ -305,6 +304,8 @@ class PatchSelector:
                 .repeat(1, h1 * w1)
                 .view(-1)
             )  # (b*n*h1*w1)
+        from torchvision.ops import batched_nms
+
         idx_keep = batched_nms(boxes, max_scores.view(-1), idx_boxes, self.NMS_IOU)
 
         if self.grid:
