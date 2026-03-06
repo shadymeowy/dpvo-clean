@@ -261,6 +261,12 @@ class DEVO:
         jj1 = jj % (self.mem)
         corr1 = altcorr.corr(self.gmap, self.pyramid_s[0], coords / 1, ii1, jj1, 3)
         corr2 = altcorr.corr(self.gmap, self.pyramid_s[1], coords / 4, ii1, jj1, 3)
+
+        if self.cfg.DISPARITY_CORR:
+            mask = torch.zeros_like(corr1)
+            mask[:, :, :, corr1.shape[3] // 2] = 1.0
+            corr1 = corr1 * mask
+            corr2 = corr2 * mask
         return torch.stack([corr1, corr2], -1).view(1, len(ii), -1)
 
     def reproject(self, indicies=None):
@@ -507,6 +513,9 @@ class DEVO:
                 target = coords[..., self.P // 2, self.P // 2] + delta.float()
 
                 weight_s = weight_s.float()
+                if self.cfg.DISPARITY_OPT:
+                    weight_s[..., 1] = 0.0
+                    delta_s[..., 1] = 0.0
                 target_s = coords_s[..., self.P // 2, self.P // 2] + delta_s.float()
 
         self.pg.target = target
