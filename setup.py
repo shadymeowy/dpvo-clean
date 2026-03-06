@@ -33,6 +33,17 @@ setup(
             include_dirs=[osp.join(ROOT, "src/")],
         ),
         CUDAExtension(
+            "cuda_voxel",
+            sources=[
+                "src/dpvo/voxel/voxel.cpp",
+                "src/dpvo/voxel/voxel_kernel.cu",
+            ],
+            extra_compile_args={
+                "cxx": ["-O3"],
+                "nvcc": ["-O3"],
+            },
+        ),
+        CUDAExtension(
             "lietorch_backends",
             include_dirs=[
                 osp.join(ROOT, "src/dpvo/lietorch/include"),
