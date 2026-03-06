@@ -18,10 +18,7 @@ from tqdm import tqdm
 
 from dpvo.config import cfg
 from dpvo.devo import DEVO
-from dpvo.event import (
-    compute_remap,
-    voxel_to_img,
-)
+from dpvo.event import voxel_to_img
 from dpvo.voxel import to_voxel_grid_cuda
 from dpvo.parallel import pgenerator
 from dpvo.plot_utils import (
@@ -41,15 +38,11 @@ def ev_generator(
     scale=1.0,
     bins=5,
     stride=1,
-    fisheye=False,
+    rect_map=None,
+    H=0,
+    W=0,
 ):
     f = h5py.File(path, "r")
-    camera_model = f.get(f"{camera_name}/calib/camera_model")[()]
-    distortion_coeffs = f.get(f"{camera_name}/calib/distortion_coeffs")[()]
-    distortion_model = f.get(f"{camera_name}/calib/distortion_model")[()]
-    intrinsics = f.get(f"{camera_name}/calib/intrinsics")[()] * scale
-    resolution = f.get(f"{camera_name}/calib/resolution")[()] * scale
-    H, W = int(resolution[1]), int(resolution[0])
 
     x = f.get(f"{camera_name}/x")
     y = f.get(f"{camera_name}/y")
@@ -57,15 +50,6 @@ def ev_generator(
     p = f.get(f"{camera_name}/p")
     ms_map = f.get(f"{camera_name}/ms_map_idx")[()]
 
-    K = np.array(
-        [
-            [intrinsics[0], 0, intrinsics[2]],
-            [0, intrinsics[1], intrinsics[3]],
-            [0, 0, 1],
-        ]
-    )
-    K_new, rect_map = compute_remap(K, distortion_coeffs, W, H, fisheye=fisheye)
-    intrinsics_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
     duration = (t[-1] - t[0]) / 1e6
 
     N1, N2 = t_limits
@@ -75,15 +59,8 @@ def ev_generator(
         N2 = duration
     N1, N2 = int(N1 / period * 1e3), int(N2 / period * 1e3)
 
-    print("camera_model", camera_model.decode())
-    print("intrinsics", intrinsics)
-    print("intrinsics_new", intrinsics_new)
-    print("resolution", resolution)
-    print("distortion_model", distortion_model.decode())
-    print("distortion_coeffs", distortion_coeffs)
     print("duration", duration)
     print("number of events", len(t))
-
     voxel = torch.zeros(bins + 1, H, W, device="cuda")
 
     for idx in tqdm(range(N1, N2, stride)):
@@ -115,25 +92,59 @@ def ev_generator(
         y_rect = np.ascontiguousarray(rect[..., 1])
 
         tperf = time.perf_counter()
-
         to_voxel_grid_cuda(voxel, x_rect, y_rect, tb, tp)
         print("to_voxel_grid time", time.perf_counter() - tperf)
 
-        yield ((t0_ms + t1_ms) / 2e3, voxel[:-1], intrinsics_new)
+        yield ((t0_ms + t1_ms) / 2e3, voxel[:-1].detach().clone())
 
 
-def read_extrinsic(path, camera_name, camera2_name):
-    with h5py.File(path, "r") as h5:
-        T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
-        T_camera2 = h5[f"{camera2_name}/calib/T_to_prophesee_left"][()]
+def compute_stereo_rect(path, camera_left, camera_right, scale=1.0):
+    with h5py.File(path, "r") as f:
+        intr_l = f[f"{camera_left}/calib/intrinsics"][()] * scale
+        dist_l = f[f"{camera_left}/calib/distortion_coeffs"][()]
+        resolution = f[f"{camera_left}/calib/resolution"][()] * scale
+        H, W = int(resolution[1]), int(resolution[0])
 
-    T_camera2_to_camera = T_camera @ np.linalg.inv(T_camera2)
-    # convert to [x, y, z, qx, qy, qz, qw]
-    r = R.from_matrix(T_camera2_to_camera[:3, :3])
-    q = r.as_quat()
-    T_camera2_to_camera = np.hstack((T_camera2_to_camera[:3, 3], q[[0, 1, 2, 3]]))
+        intr_r = f[f"{camera_right}/calib/intrinsics"][()] * scale
+        dist_r = f[f"{camera_right}/calib/distortion_coeffs"][()]
 
-    return T_camera2_to_camera
+        T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
+        T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
+
+    K_l = np.array([[intr_l[0], 0, intr_l[2]], [0, intr_l[1], intr_l[3]], [0, 0, 1]])
+    K_r = np.array([[intr_r[0], 0, intr_r[2]], [0, intr_r[1], intr_r[3]], [0, 0, 1]])
+
+    T_l2r = T_l @ np.linalg.inv(T_r)
+    R_ext, t_ext = T_l2r[:3, :3], T_l2r[:3, 3]
+
+    R1, R2, P1, P2, _, _, _ = cv2.stereoRectify(
+        K_l, dist_l, K_r, dist_r, (W, H), R_ext, t_ext,
+        flags=cv2.CALIB_ZERO_DISPARITY, alpha=0.0,
+    )
+
+    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
+    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape(2, -1).astype("float32")
+
+    pts_l = cv2.undistortPointsIter(coords, K_l, dist_l, R1, P1[:3, :3], criteria=term_criteria)
+    rect_map_l = pts_l.reshape(H, W, 2)
+
+    pts_r = cv2.undistortPointsIter(coords, K_r, dist_r, R2, P2[:3, :3], criteria=term_criteria)
+    rect_map_r = pts_r.reshape(H, W, 2)
+
+    for rect_map in (rect_map_l, rect_map_r):
+        oob = (
+            (rect_map[..., 0] < 0) | (rect_map[..., 0] >= W - 1)
+            | (rect_map[..., 1] < 0) | (rect_map[..., 1] >= H - 1)
+        )
+        rect_map[oob] = -1
+
+    intrinsics_rect = np.array([P1[0, 0], P1[1, 1], P1[0, 2], P1[1, 2]])
+    baseline = P2[0, 3] / P2[0, 0]
+    extrinsic_rect = np.array([baseline, 0, 0, 0, 0, 0, 1])
+
+    print("intrinsics_rect", intrinsics_rect)
+    print("baseline", baseline)
+    return rect_map_l, rect_map_r, intrinsics_rect, extrinsic_rect, (H, W)
 
 
 def main():
@@ -185,8 +196,9 @@ def main():
             H, W = int(resolution[1]), int(resolution[0])
             bins = 5
 
-        extrinsics = read_extrinsic(
-            args.data_h5, args.camera, args.camera.replace("left", "right")
+        rect_map_l, rect_map_r, intrinsics_rect, extrinsics, (H, W) = compute_stereo_rect(
+            args.data_h5, args.camera, args.camera.replace("left", "right"),
+            scale=args.scale,
         )
 
         slam = DEVO(
@@ -209,6 +221,9 @@ def main():
             scale=args.scale,
             bins=bins,
             stride=args.stride,
+            rect_map=rect_map_l,
+            H=H,
+            W=W
         )
 
         generator2 = pgenerator(
@@ -220,9 +235,15 @@ def main():
             scale=args.scale,
             bins=bins,
             stride=args.stride,
+            rect_map=rect_map_r,
+            H=H,
+            W=W
         )
 
-        for i, ((t1, voxel1, intrinsics1), (t2, voxel2, intrinsics2)) in enumerate(
+        intrinsics1 = torch.from_numpy(intrinsics_rect).cuda()
+        intrinsics2 = torch.from_numpy(intrinsics_rect).cuda()
+
+        for i, ((t1, voxel1), (t2, voxel2)) in enumerate(
             zip(generator1, generator2, strict=False)
         ):
             if args.show:
@@ -231,9 +252,6 @@ def main():
                 concat = cv2.hconcat([img1, img2])
                 cv2.imshow("concat", concat)
                 cv2.waitKey(1)
-
-            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
-            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
                 slam(t1, (voxel1, voxel2), (intrinsics1, intrinsics2))
