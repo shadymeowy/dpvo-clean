@@ -26,3 +26,6 @@ NORM: 'std'
 # Eval mode of patch selector (random, topk, multinomial)
 SCORER_EVAL_MODE: 'multi'
 SCORER_EVAL_USE_GRID: True
+
+DISPARITY_CORR: False
+DISPARITY_OPT: False

@@ -9,7 +9,7 @@ PATCH_LIFETIME: 6
 KEYFRAME_INDEX: 3
 
 # threshold for keyframe removal
-KEYFRAME_THRESH: 5.0
+KEYFRAME_THRESH: 15.0
 
 # camera motion model
 MOTION_MODEL: 'DAMPED_LINEAR'
@@ -28,3 +28,6 @@ NORM: 'std'
 # Eval mode of patch selector (random, topk, multinomial)
 SCORER_EVAL_MODE: 'multi'
 SCORER_EVAL_USE_GRID: True
+
+DISPARITY_CORR: True
+DISPARITY_OPT: True

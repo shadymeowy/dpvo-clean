@@ -18,8 +18,8 @@ _C.SCORER_EVAL_USE_GRID = True
 # Normalizer (only evs): norm, standard
 _C.NORM = "std"
 
-_C.DISPARITY_CORR = True
-_C.DISPARITY_OPT = True
+_C.DISPARITY_CORR = False
+_C.DISPARITY_OPT = False
 
 # VO config (increase for better accuracy)
 _C.PATCHES_PER_FRAME = 80
