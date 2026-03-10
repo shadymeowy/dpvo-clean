@@ -33,7 +33,7 @@ from dpvo.plot_utils import (
 from dpvo.utils import Timer
 
 
-def ev_generator(
+def voxel_reader(
     path,
     camera_name,
     bins,
@@ -125,7 +125,7 @@ def ev_stereo_generator(
     )
 
     gen_l = pgenerator(
-        ev_generator,
+        voxel_reader,
         path,
         camera_left,
         scale=scale,
@@ -135,7 +135,7 @@ def ev_stereo_generator(
         **kwargs,
     )
     gen_r = pgenerator(
-        ev_generator,
+        voxel_reader,
         path,
         camera_right,
         scale=scale,
