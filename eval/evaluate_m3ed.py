@@ -28,49 +28,19 @@ from dpvo.plot_utils import (
 from dpvo.utils import Timer
 
 
-def rgb_generator(
-    path, camera_name, start=None, stop=None, stride=1, clahe=False, scale=1.0
-):
+def image_reader(path, camera_name, start, stop, stride, clahe, scale, H, W, rect_map):
     f = h5py.File(path, "r")
-    camera_model = f.get(f"{camera_name}/calib/camera_model")[()]
-    distortion_coeffs = f.get(f"{camera_name}/calib/distortion_coeffs")[()]
-    distortion_model = f.get(f"{camera_name}/calib/distortion_model")[()]
-    intrinsics = f.get(f"{camera_name}/calib/intrinsics")[()] * scale
-    resolution = f.get(f"{camera_name}/calib/resolution")[()] * scale
-    H, W = int(resolution[1]), int(resolution[0])
-
     data = f.get(f"{camera_name}/data")
     ts = f.get(f"{'/'.join(camera_name.split('/')[:-1])}/ts")[...] / 1e6
-
-    K = np.array(
-        [
-            [intrinsics[0], 0, intrinsics[2]],
-            [0, intrinsics[1], intrinsics[3]],
-            [0, 0, 1],
-        ]
-    )
-    K_new, _ = cv2.getOptimalNewCameraMatrix(K, distortion_coeffs, (W, H), 0, (W, H))
-    intrinsics_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
-    mapx, mapy = cv2.initUndistortRectifyMap(
-        K, distortion_coeffs, None, K_new, (W, H), cv2.CV_32FC1
-    )
+    N = data.shape[0] // stride
 
     if clahe:
         clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(8, 8))
 
-    N = data.shape[0] // stride
-
-    print("camera_model", camera_model.decode())
-    print("intrinsics", intrinsics)
-    print("intrinsics_new", intrinsics_new)
-    print("resolution", resolution)
-    print("distortion_model", distortion_model.decode())
-    print("distortion_coeffs", distortion_coeffs)
-
     for t, image in tqdm(islice(zip(ts, data), start, stop, stride), total=N):
         if scale != 1.0:
             image = cv2.resize(image, (W, H))
-        image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+        image = cv2.remap(image, rect_map[0], rect_map[1], cv2.INTER_LINEAR)
 
         if len(image.shape) == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -79,21 +49,139 @@ def rgb_generator(
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             image = clahe.apply(image)
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        yield t, image, intrinsics_new
+        yield t, image
 
 
-def read_extrinsic(path, camera_name, camera2_name):
-    with h5py.File(path, "r") as h5:
-        T_camera = h5[f"{camera_name}/calib/T_to_prophesee_left"][()]
-        T_camera2 = h5[f"{camera2_name}/calib/T_to_prophesee_left"][()]
+def rgb_stereo_generator(
+    path,
+    camera_left,
+    camera_right,
+    scale=1.0,
+    fisheye=False,
+    rectify=False,
+    **kwargs,
+):
+    f = h5py.File(path, "r")
 
-    T_camera2_to_camera = T_camera @ np.linalg.inv(T_camera2)
-    # convert to [x, y, z, qx, qy, qz, qw]
-    r = R.from_matrix(T_camera2_to_camera[:3, :3])
+    dist_l = f.get(f"{camera_left}/calib/distortion_coeffs")[()]
+    intr_l = f.get(f"{camera_left}/calib/intrinsics")[()] * scale
+    resolution = f.get(f"{camera_left}/calib/resolution")[()] * scale
+    H, W = int(resolution[1]), int(resolution[0])
+
+    intr_r = f[f"{camera_right}/calib/intrinsics"][()] * scale
+    dist_r = f[f"{camera_right}/calib/distortion_coeffs"][()]
+
+    T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
+    T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
+
+    fun = compute_stereo_rect_map if rectify else compute_stereo_map
+    map_l, map_r, intr_l, intr_r, extr = fun(
+        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye
+    )
+
+    gen_l = pgenerator(
+        image_reader,
+        path,
+        camera_left,
+        scale=scale,
+        W=W,
+        H=H,
+        rect_map=map_l,
+        **kwargs,
+    )
+    gen_r = pgenerator(
+        image_reader,
+        path,
+        camera_right,
+        scale=scale,
+        W=W,
+        H=H,
+        rect_map=map_r,
+        **kwargs,
+    )
+
+    return zip(gen_l, gen_r, strict=False), intr_l, intr_r, (H, W), extr
+
+
+def compute_map(intr, dist, H, W, fisheye):
+    K = np.array(
+        [
+            [intr[0], 0, intr[2]],
+            [0, intr[1], intr[3]],
+            [0, 0, 1],
+        ]
+    )
+    K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, (W, H), 0, (W, H))
+    intr = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
+
+    if fisheye:
+        map_x, map_y = cv2.fisheye.initUndistortRectifyMap(
+            K, dist, None, K_new, (W, H), cv2.CV_32FC1
+        )
+    else:
+        map_x, map_y = cv2.initUndistortRectifyMap(
+            K, dist, None, K_new, (W, H), cv2.CV_32FC1
+        )
+
+    return intr, (map_x, map_y)
+
+
+def compute_stereo_map(intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye):
+    intr_l, map_l = compute_map(intr_l, dist_l, H, W, fisheye)
+    intr_r, map_r = compute_map(intr_r, dist_r, H, W, fisheye)
+
+    T_l2r = T_l @ np.linalg.inv(T_r)
+    r = R.from_matrix(T_l2r[:3, :3])
     q = r.as_quat()
-    T_camera2_to_camera = np.hstack((T_camera2_to_camera[:3, 3], q[[0, 1, 2, 3]]))
+    extr = np.hstack((T_l2r[:3, 3], q[[0, 1, 2, 3]]))
 
-    return T_camera2_to_camera
+    return map_l, map_r, intr_l, intr_r, extr
+
+
+def compute_stereo_rect_map(intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye):
+    K_l = np.array([[intr_l[0], 0, intr_l[2]], [0, intr_l[1], intr_l[3]], [0, 0, 1]])
+    K_r = np.array([[intr_r[0], 0, intr_r[2]], [0, intr_r[1], intr_r[3]], [0, 0, 1]])
+
+    T_l2r = T_l @ np.linalg.inv(T_r)
+    R_rel = T_l2r[:3, :3]
+    t_rel = T_l2r[:3, 3]
+
+    if fisheye:
+        R_l, R_r, P_l, P_r, _ = cv2.fisheye.stereoRectify(
+            K_l,
+            dist_l,
+            K_r,
+            dist_r,
+            (W, H),
+            R_rel,
+            t_rel,
+            flags=cv2.fisheye.CALIB_ZERO_DISPARITY,
+            newImageSize=(W, H),
+        )
+        map_l = cv2.fisheye.initUndistortRectifyMap(
+            K_l, dist_l, R_l, P_l[:, :3], (W, H), cv2.CV_32FC1
+        )
+        map_r = cv2.fisheye.initUndistortRectifyMap(
+            K_r, dist_r, R_r, P_r[:, :3], (W, H), cv2.CV_32FC1
+        )
+    else:
+        R_l, R_r, P_l, P_r, _, _, _ = cv2.stereoRectify(
+            K_l, dist_l, K_r, dist_r, (W, H), R_rel, t_rel, alpha=0, newImageSize=(W, H)
+        )
+        map_l = cv2.initUndistortRectifyMap(
+            K_l, dist_l, R_l, P_l[:, :3], (W, H), cv2.CV_32FC1
+        )
+        map_r = cv2.initUndistortRectifyMap(
+            K_r, dist_r, R_r, P_r[:, :3], (W, H), cv2.CV_32FC1
+        )
+
+    intr_l_new = np.array([P_l[0, 0], P_l[1, 1], P_l[0, 2], P_l[1, 2]])
+    intr_r_new = np.array([P_r[0, 0], P_r[1, 1], P_r[0, 2], P_r[1, 2]])
+
+    tx = P_r[0, 3] / P_r[0, 0]
+    extr_new = np.array([tx, 0, 0, 0, 0, 0, 1])
+
+    return map_l, map_r, intr_l_new, intr_r_new, extr_new
 
 
 def main():
@@ -121,6 +209,7 @@ def main():
     parser.add_argument("--save_matches", action="store_true")
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--timeit-file", type=str, default=None)
+    parser.add_argument("--no_rect", action="store_true")
 
     args = parser.parse_args()
 
@@ -138,12 +227,16 @@ def main():
         profile.enable()
 
     with torch.no_grad():
-        with h5py.File(args.data_h5, "r") as f:
-            resolution = f.get(f"{args.camera}/calib/resolution")[()] * args.scale
-            H, W = int(resolution[1]), int(resolution[0])
-
-        extrinsics = read_extrinsic(
-            args.data_h5, args.camera, args.camera.replace("left", "right")
+        gen, intr_l, intr_r, (H, W), extr = rgb_stereo_generator(
+            path=args.data_h5,
+            camera_left=args.camera,
+            camera_right=args.camera.replace("left", "right"),
+            start=args.start,
+            stop=args.stop,
+            stride=args.stride,
+            scale=args.scale,
+            clahe=args.clahe,
+            rectify=not args.no_rect,
         )
 
         slam = DPVO(
@@ -152,46 +245,25 @@ def main():
             ht=H,
             wd=W,
             show=args.show,
-            extrinsics=extrinsics,
+            extrinsics=extr,
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
-        generator1 = pgenerator(
-            rgb_generator,
-            path=args.data_h5,
-            camera_name=args.camera,
-            start=args.start,
-            stop=args.stop,
-            stride=args.stride,
-            scale=args.scale,
-            clahe=args.clahe,
-        )
-        generator2 = pgenerator(
-            rgb_generator,
-            path=args.data_h5,
-            camera_name=args.camera.replace("left", "right"),
-            start=args.start,
-            stop=args.stop,
-            stride=args.stride,
-            scale=args.scale,
-            clahe=args.clahe,
-        )
-        for i, ((t1, image1, intrinsics1), (t2, image2, intrinsics2)) in enumerate(
-            zip(generator1, generator2, strict=False)
-        ):
+
+        intr_l = torch.from_numpy(intr_l).cuda()
+        intr_r = torch.from_numpy(intr_r).cuda()
+
+        for i, ((t1, image1), (_, image2)) in enumerate(gen):
             if args.show:
                 concat = cv2.hconcat([image1, image2])
                 cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
             image1 = torch.from_numpy(image1).permute(2, 0, 1).cuda()
-            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
-
             image2 = torch.from_numpy(image2).permute(2, 0, 1).cuda()
-            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                slam(t1, (image1, image2), (intrinsics1, intrinsics2))
+                slam(t1, (image1, image2), (intr_l, intr_r))
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
@@ -230,7 +302,7 @@ def main():
         save_ply(scene, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics1, H, W)
+        save_output_for_COLMAP(scene, traj_est, points, colors, *intr_l, H, W)
 
     if args.save_point_cloud:
         os.makedirs("saved_point_clouds", exist_ok=True)
