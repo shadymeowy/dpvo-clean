@@ -2,10 +2,10 @@
 ### DPVO Config File ###
 
 # VO config (increase for better accuracy)
-PATCHES_PER_FRAME: 36
-REMOVAL_WINDOW: 12
-OPTIMIZATION_WINDOW: 5
-PATCH_LIFETIME: 6
+PATCHES_PER_FRAME: 32
+REMOVAL_WINDOW: 15
+OPTIMIZATION_WINDOW: 6
+PATCH_LIFETIME: 8
 KEYFRAME_INDEX: 4
 
 # threshold for keyframe removal
