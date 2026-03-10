@@ -18,7 +18,7 @@ from tqdm import tqdm
 from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
-    compute_remap,
+    compute_inv_map,
     get_time_indices_offsets,
     to_voxel_grid,
     voxel_to_img,
@@ -76,7 +76,7 @@ def ev_generator(
     intrinsics = np.array(intrinsics)
     distortion = np.array(distortion)
 
-    intrinsics_new, rect_map = compute_remap(
+    intrinsics_new, rect_map = compute_inv_map(
         intrinsics, distortion, W, H, fisheye=fisheye
     )
 

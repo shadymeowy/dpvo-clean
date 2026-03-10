@@ -19,10 +19,7 @@ from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
     voxel_to_img,
-    compute_stereo_remap,
-    compute_stereo_rect_remap,
 )
-from dpvo.voxel import to_voxel_grid_cuda
 from dpvo.parallel import pgenerator
 from dpvo.plot_utils import (
     plot_trajectory,
@@ -30,7 +27,9 @@ from dpvo.plot_utils import (
     save_ply,
     save_point_cloud,
 )
+from dpvo.rectify import compute_stereo_inv_map
 from dpvo.utils import Timer
+from dpvo.voxel import to_voxel_grid_cuda
 
 
 def voxel_reader(
@@ -119,9 +118,8 @@ def ev_stereo_generator(
     T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
     T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
 
-    compute_rect_map = compute_stereo_rect_remap if rectify else compute_stereo_remap
-    map_l, map_r, intr_l, intr_r, extr = compute_rect_map(
-        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye
+    map_l, map_r, intr_l, intr_r, extr = compute_stereo_inv_map(
+        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, rectify, fisheye
     )
 
     gen_l = pgenerator(

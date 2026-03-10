@@ -25,6 +25,7 @@ from dpvo.plot_utils import (
     save_ply,
     save_point_cloud,
 )
+from dpvo.rectify import compute_stereo_map
 from dpvo.utils import Timer
 
 
@@ -74,9 +75,8 @@ def rgb_stereo_generator(
     T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
     T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
 
-    fun = compute_stereo_rect_map if rectify else compute_stereo_map
-    map_l, map_r, intr_l, intr_r, extr = fun(
-        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye
+    map_l, map_r, intr_l, intr_r, extr = compute_stereo_map(
+        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, rectify, fisheye
     )
 
     gen_l = pgenerator(
@@ -101,87 +101,6 @@ def rgb_stereo_generator(
     )
 
     return zip(gen_l, gen_r, strict=False), intr_l, intr_r, (H, W), extr
-
-
-def compute_map(intr, dist, H, W, fisheye):
-    K = np.array(
-        [
-            [intr[0], 0, intr[2]],
-            [0, intr[1], intr[3]],
-            [0, 0, 1],
-        ]
-    )
-    K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, (W, H), 0, (W, H))
-    intr = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
-
-    if fisheye:
-        map_x, map_y = cv2.fisheye.initUndistortRectifyMap(
-            K, dist, None, K_new, (W, H), cv2.CV_32FC1
-        )
-    else:
-        map_x, map_y = cv2.initUndistortRectifyMap(
-            K, dist, None, K_new, (W, H), cv2.CV_32FC1
-        )
-
-    return intr, (map_x, map_y)
-
-
-def compute_stereo_map(intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye):
-    intr_l, map_l = compute_map(intr_l, dist_l, H, W, fisheye)
-    intr_r, map_r = compute_map(intr_r, dist_r, H, W, fisheye)
-
-    T_l2r = T_l @ np.linalg.inv(T_r)
-    r = R.from_matrix(T_l2r[:3, :3])
-    q = r.as_quat()
-    extr = np.hstack((T_l2r[:3, 3], q[[0, 1, 2, 3]]))
-
-    return map_l, map_r, intr_l, intr_r, extr
-
-
-def compute_stereo_rect_map(intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye):
-    K_l = np.array([[intr_l[0], 0, intr_l[2]], [0, intr_l[1], intr_l[3]], [0, 0, 1]])
-    K_r = np.array([[intr_r[0], 0, intr_r[2]], [0, intr_r[1], intr_r[3]], [0, 0, 1]])
-
-    T_l2r = T_l @ np.linalg.inv(T_r)
-    R_rel = T_l2r[:3, :3]
-    t_rel = T_l2r[:3, 3]
-
-    if fisheye:
-        R_l, R_r, P_l, P_r, _ = cv2.fisheye.stereoRectify(
-            K_l,
-            dist_l,
-            K_r,
-            dist_r,
-            (W, H),
-            R_rel,
-            t_rel,
-            flags=cv2.fisheye.CALIB_ZERO_DISPARITY,
-            newImageSize=(W, H),
-        )
-        map_l = cv2.fisheye.initUndistortRectifyMap(
-            K_l, dist_l, R_l, P_l[:, :3], (W, H), cv2.CV_32FC1
-        )
-        map_r = cv2.fisheye.initUndistortRectifyMap(
-            K_r, dist_r, R_r, P_r[:, :3], (W, H), cv2.CV_32FC1
-        )
-    else:
-        R_l, R_r, P_l, P_r, _, _, _ = cv2.stereoRectify(
-            K_l, dist_l, K_r, dist_r, (W, H), R_rel, t_rel, alpha=0, newImageSize=(W, H)
-        )
-        map_l = cv2.initUndistortRectifyMap(
-            K_l, dist_l, R_l, P_l[:, :3], (W, H), cv2.CV_32FC1
-        )
-        map_r = cv2.initUndistortRectifyMap(
-            K_r, dist_r, R_r, P_r[:, :3], (W, H), cv2.CV_32FC1
-        )
-
-    intr_l_new = np.array([P_l[0, 0], P_l[1, 1], P_l[0, 2], P_l[1, 2]])
-    intr_r_new = np.array([P_r[0, 0], P_r[1, 1], P_r[0, 2], P_r[1, 2]])
-
-    tx = P_r[0, 3] / P_r[0, 0]
-    extr_new = np.array([tx, 0, 0, 0, 0, 0, 1])
-
-    return map_l, map_r, intr_l_new, intr_r_new, extr_new
 
 
 def main():
