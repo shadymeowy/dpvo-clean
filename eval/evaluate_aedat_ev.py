@@ -76,15 +76,9 @@ def ev_generator(
     intrinsics = np.array(intrinsics)
     distortion = np.array(distortion)
 
-    K = np.array(
-        [
-            [intrinsics[0], 0, intrinsics[2]],
-            [0, intrinsics[1], intrinsics[3]],
-            [0, 0, 1],
-        ]
+    intrinsics_new, rect_map = compute_remap(
+        intrinsics, distortion, W, H, fisheye=fisheye
     )
-    K_new, rect_map = compute_remap(K, distortion, W, H, fisheye=fisheye)
-    intrinsics_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
 
     voxel = np.zeros((bins + 1, H, W), dtype=np.float32)
     duration = (ts[-1] - ts[0]) / 1e6

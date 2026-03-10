@@ -13,12 +13,15 @@ from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
-from scipy.spatial.transform import Rotation as R
 from tqdm import tqdm
 
 from dpvo.config import cfg
 from dpvo.devo import DEVO
-from dpvo.event import voxel_to_img
+from dpvo.event import (
+    voxel_to_img,
+    compute_stereo_remap,
+    compute_stereo_rect_remap,
+)
 from dpvo.voxel import to_voxel_grid_cuda
 from dpvo.parallel import pgenerator
 from dpvo.plot_utils import (
@@ -33,14 +36,14 @@ from dpvo.utils import Timer
 def ev_generator(
     path,
     camera_name,
+    bins,
+    W,
+    H,
     period,
-    t_limits=(None, None),
+    rect_map,
     scale=1.0,
-    bins=5,
+    t_limits=(None, None),
     stride=1,
-    rect_map=None,
-    H=0,
-    W=0,
 ):
     f = h5py.File(path, "r")
 
@@ -82,69 +85,67 @@ def ev_generator(
             tx = (tx * scale).astype(np.int32)
             ty = (ty * scale).astype(np.int32)
 
-        print("event count", idx1 - idx0)
-        # num_events = idx1 - idx0
-        # if num_events < 200_000:
-        #    print(f"Skipping voxel at {t0_ms}-{t1_ms} ms: only {num_events} events")
-        #    continue
         rect = rect_map[ty, tx]
         x_rect = np.ascontiguousarray(rect[..., 0])
         y_rect = np.ascontiguousarray(rect[..., 1])
 
         tperf = time.perf_counter()
         to_voxel_grid_cuda(voxel, x_rect, y_rect, tb, tp)
+
+        print("event count", idx1 - idx0)
         print("to_voxel_grid time", time.perf_counter() - tperf)
 
         yield ((t0_ms + t1_ms) / 2e3, voxel[:-1].detach().clone())
 
 
-def compute_stereo_rect(path, camera_left, camera_right, scale=1.0):
-    with h5py.File(path, "r") as f:
-        intr_l = f[f"{camera_left}/calib/intrinsics"][()] * scale
-        dist_l = f[f"{camera_left}/calib/distortion_coeffs"][()]
-        resolution = f[f"{camera_left}/calib/resolution"][()] * scale
-        H, W = int(resolution[1]), int(resolution[0])
+def ev_stereo_generator(
+    path,
+    camera_left,
+    camera_right,
+    scale,
+    rectify,
+    fisheye,
+    **kwargs,
+):
+    f = h5py.File(path, "r")
+    intr_l = f[f"{camera_left}/calib/intrinsics"][()] * scale
+    dist_l = f[f"{camera_left}/calib/distortion_coeffs"][()]
+    resolution = f[f"{camera_left}/calib/resolution"][()] * scale
+    H, W = int(resolution[1]), int(resolution[0])
 
-        intr_r = f[f"{camera_right}/calib/intrinsics"][()] * scale
-        dist_r = f[f"{camera_right}/calib/distortion_coeffs"][()]
+    intr_r = f[f"{camera_right}/calib/intrinsics"][()] * scale
+    dist_r = f[f"{camera_right}/calib/distortion_coeffs"][()]
 
-        T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
-        T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
+    T_l = f[f"{camera_left}/calib/T_to_prophesee_left"][()]
+    T_r = f[f"{camera_right}/calib/T_to_prophesee_left"][()]
 
-    K_l = np.array([[intr_l[0], 0, intr_l[2]], [0, intr_l[1], intr_l[3]], [0, 0, 1]])
-    K_r = np.array([[intr_r[0], 0, intr_r[2]], [0, intr_r[1], intr_r[3]], [0, 0, 1]])
-
-    T_l2r = T_l @ np.linalg.inv(T_r)
-    R_ext, t_ext = T_l2r[:3, :3], T_l2r[:3, 3]
-
-    R1, R2, P1, P2, _, _, _ = cv2.stereoRectify(
-        K_l, dist_l, K_r, dist_r, (W, H), R_ext, t_ext,
-        flags=cv2.CALIB_ZERO_DISPARITY, alpha=0.0,
+    compute_rect_map = compute_stereo_rect_remap if rectify else compute_stereo_remap
+    map_l, map_r, intr_l, intr_r, extr = compute_rect_map(
+        intr_l, intr_r, dist_l, dist_r, T_l, T_r, H, W, fisheye
     )
 
-    term_criteria = (cv2.TERM_CRITERIA_MAX_ITER | cv2.TERM_CRITERIA_EPS, 100, 0.001)
-    coords = np.stack(np.meshgrid(np.arange(W), np.arange(H))).reshape(2, -1).astype("float32")
+    gen_l = pgenerator(
+        ev_generator,
+        path,
+        camera_left,
+        scale=scale,
+        W=W,
+        H=H,
+        rect_map=map_l,
+        **kwargs,
+    )
+    gen_r = pgenerator(
+        ev_generator,
+        path,
+        camera_right,
+        scale=scale,
+        W=W,
+        H=H,
+        rect_map=map_r,
+        **kwargs,
+    )
 
-    pts_l = cv2.undistortPointsIter(coords, K_l, dist_l, R1, P1[:3, :3], criteria=term_criteria)
-    rect_map_l = pts_l.reshape(H, W, 2)
-
-    pts_r = cv2.undistortPointsIter(coords, K_r, dist_r, R2, P2[:3, :3], criteria=term_criteria)
-    rect_map_r = pts_r.reshape(H, W, 2)
-
-    for rect_map in (rect_map_l, rect_map_r):
-        oob = (
-            (rect_map[..., 0] < 0) | (rect_map[..., 0] >= W - 1)
-            | (rect_map[..., 1] < 0) | (rect_map[..., 1] >= H - 1)
-        )
-        rect_map[oob] = -1
-
-    intrinsics_rect = np.array([P1[0, 0], P1[1, 1], P1[0, 2], P1[1, 2]])
-    baseline = P2[0, 3] / P2[0, 0]
-    extrinsic_rect = np.array([baseline, 0, 0, 0, 0, 0, 1])
-
-    print("intrinsics_rect", intrinsics_rect)
-    print("baseline", baseline)
-    return rect_map_l, rect_map_r, intrinsics_rect, extrinsic_rect, (H, W)
+    return zip(gen_l, gen_r, strict=False), intr_l, intr_r, (H, W), extr
 
 
 def main():
@@ -174,6 +175,7 @@ def main():
     parser.add_argument("--save_point_cloud", action="store_true")
     parser.add_argument("--save_matches", action="store_true")
     parser.add_argument("--fisheye", action="store_true")
+    parser.add_argument("--no_rect", action="store_true")
 
     args = parser.parse_args()
 
@@ -191,14 +193,17 @@ def main():
         profile.enable()
 
     with torch.no_grad():
-        with h5py.File(args.data_h5, "r") as f:
-            resolution = f.get(f"{args.camera}/calib/resolution")[()] * args.scale
-            H, W = int(resolution[1]), int(resolution[0])
-            bins = 5
-
-        rect_map_l, rect_map_r, intrinsics_rect, extrinsics, (H, W) = compute_stereo_rect(
-            args.data_h5, args.camera, args.camera.replace("left", "right"),
+        gen, intr_l, intr_r, (H, W), extr = ev_stereo_generator(
+            path=args.data_h5,
+            camera_left=args.camera,
+            camera_right=args.camera.replace("left", "right"),
+            period=args.period,
+            t_limits=(args.start, args.stop),
             scale=args.scale,
+            bins=5,
+            stride=args.stride,
+            fisheye=args.fisheye,
+            rectify=not args.no_rect,
         )
 
         slam = DEVO(
@@ -207,45 +212,15 @@ def main():
             ht=H,
             wd=W,
             show=args.show,
-            extrinsics=extrinsics,
+            extrinsics=extr,
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
 
-        generator1 = pgenerator(
-            ev_generator,
-            path=args.data_h5,
-            camera_name=args.camera,
-            period=args.period,
-            t_limits=(args.start, args.stop),
-            scale=args.scale,
-            bins=bins,
-            stride=args.stride,
-            rect_map=rect_map_l,
-            H=H,
-            W=W
-        )
+        intr_l = torch.from_numpy(intr_l).cuda()
+        intr_r = torch.from_numpy(intr_r).cuda()
 
-        generator2 = pgenerator(
-            ev_generator,
-            path=args.data_h5,
-            camera_name=args.camera.replace("left", "right"),
-            period=args.period,
-            t_limits=(args.start, args.stop),
-            scale=args.scale,
-            bins=bins,
-            stride=args.stride,
-            rect_map=rect_map_r,
-            H=H,
-            W=W
-        )
-
-        intrinsics1 = torch.from_numpy(intrinsics_rect).cuda()
-        intrinsics2 = torch.from_numpy(intrinsics_rect).cuda()
-
-        for i, ((t1, voxel1), (t2, voxel2)) in enumerate(
-            zip(generator1, generator2, strict=False)
-        ):
+        for i, ((t1, voxel1), (t2, voxel2)) in enumerate(gen):
             if args.show:
                 img1 = voxel_to_img(voxel1.cpu().numpy())
                 img2 = voxel_to_img(voxel2.cpu().numpy())
@@ -254,7 +229,7 @@ def main():
                 cv2.waitKey(1)
 
             with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
-                slam(t1, (voxel1, voxel2), (intrinsics1, intrinsics2))
+                slam(t1, (voxel1, voxel2), (intr_l, intr_r))
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
@@ -293,7 +268,7 @@ def main():
         save_ply(scene, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics1, H, W)
+        save_output_for_COLMAP(scene, traj_est, points, colors, *intr_l, H, W)
 
     if args.save_point_cloud:
         os.makedirs("saved_point_clouds", exist_ok=True)
