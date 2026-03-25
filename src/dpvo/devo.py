@@ -776,15 +776,29 @@ class DEVO:
             self.long_term_lc.attempt_loop_closure(self.n)
             self.long_term_lc.lc_callback()
 
-        self.online_poses.append(
-            SE3(self.pg.poses_[self.n - 1]).inv().data.cpu().numpy()
-        )
+        pose = SE3(self.pg.poses_[self.n - 1]).inv()
+        pose = pose.data.cpu().numpy()
+        self.online_poses.append(pose)
 
         if self.show:
             try:
                 self.visualize_patches()
             except Exception as e:
                 print(f"Error in visualize_patches: {e}")
+
+        return pose
+    
+    def point_cloud(self):
+        # return point cloud associated with latest frame
+        x = self.pg.patches_[(self.pg.n - 1), :, 0, 1, 1]
+        y = self.pg.patches_[(self.pg.n - 1), :, 1, 1, 1]
+        z = self.pg.patches_[(self.pg.n - 1), :, 2, 1, 1]
+        zp = 1 / z
+        intr = self.intrinsics[0, self.n - 1]
+        xp = (x - intr[2]) * zp / intr[0]
+        yp = (y - intr[3]) * zp / intr[1]
+        points = torch.stack([xp, yp, zp], dim=-1)
+        return points
 
     def visualize_patches(self):
         return
