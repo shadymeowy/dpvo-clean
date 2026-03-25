@@ -12,6 +12,7 @@ from evo.core import sync
 from evo.core.metrics import PoseRelation
 from evo.core.trajectory import PoseTrajectory3D
 from evo.tools import file_interface
+from scipy.spatial.transform import Rotation as R
 
 from dpvo.bag import bag_image_iterator, read_calibration, sync_generators
 from dpvo.config import cfg
@@ -21,35 +22,22 @@ from dpvo.plot_utils import (
     save_output_for_COLMAP,
     save_ply,
 )
+from dpvo.rectify import compute_stereo_map
 from dpvo.utils import Timer
 
 
 def rgb_generator(
     path_bag,
     cam_topic,
-    H,
-    W,
-    intr,
-    dist,
     start=None,
     stop=None,
     clahe=False,
     scale=1.0,
     shift=0,
+    H=None,
+    W=None,
+    rect_map=None,
 ):
-    H, W = int(scale * H), int(scale * W)
-    intr = scale * np.array(intr)
-    K = np.array(
-        [
-            [intr[0], 0, intr[2]],
-            [0, intr[1], intr[3]],
-            [0, 0, 1],
-        ]
-    )
-    K_new, _ = cv2.getOptimalNewCameraMatrix(K, dist, (W, H), 0, (W, H))
-    intr_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
-    mapx, mapy = cv2.initUndistortRectifyMap(K, dist, None, K_new, (W, H), cv2.CV_32FC1)
-
     if clahe:
         clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(8, 8))
 
@@ -57,7 +45,7 @@ def rgb_generator(
     for t, image in islice(it, shift + start, stop):
         if scale != 1.0:
             image = cv2.resize(image, (W, H))
-        image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+        image = cv2.remap(image, rect_map[0], rect_map[1], cv2.INTER_LINEAR)
 
         if len(image.shape) == 2:
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -66,7 +54,56 @@ def rgb_generator(
             image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
             image = clahe.apply(image)
             image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
-        yield t, image, intr_new
+        yield t, image
+
+
+def rgb_stereo_generator(
+    path_bag,
+    path_config,
+    cam1,
+    cam2,
+    scale=1.0,
+    rectify=False,
+    **kwargs,
+):
+    res1, res2, intr1, intr2, dist1, dist2, extr = read_calibration(path_config)
+    assert res1.tolist() == res2.tolist()
+
+    H = int(res1[1] * scale)
+    W = int(res1[0] * scale)
+    intr1 = np.array(intr1) * scale
+    intr2 = np.array(intr2) * scale
+
+    T_l = np.eye(4)
+    T_l2r = np.eye(4)
+    T_l2r[:3, :3] = R.from_quat(extr[3:]).as_matrix()
+    T_l2r[:3, 3] = extr[:3]
+    T_r = np.linalg.inv(T_l2r)
+
+    map_l, map_r, intr_l, intr_r, extr = compute_stereo_map(
+        intr1, intr2, dist1, dist2, T_l, T_r, H, W, rectify, fisheye=False
+    )
+
+    gen_l = rgb_generator(
+        path_bag=path_bag,
+        cam_topic=cam1,
+        scale=scale,
+        H=H,
+        W=W,
+        rect_map=map_l,
+        **kwargs,
+    )
+    gen_r = rgb_generator(
+        path_bag=path_bag,
+        cam_topic=cam2,
+        scale=scale,
+        H=H,
+        W=W,
+        rect_map=map_r,
+        **kwargs,
+    )
+
+    return sync_generators(gen_l, gen_r), intr_l, intr_r, (H, W), extr
 
 
 def main():
@@ -96,6 +133,7 @@ def main():
     parser.add_argument("--timeit-file", type=str, default=None)
     parser.add_argument("--point_cloud", action="store_true")
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--no_rect", action="store_true")
 
     args = parser.parse_args()
 
@@ -122,55 +160,35 @@ def main():
             viz = ProcessViz()
 
     with torch.no_grad():
-        res1, res2, intr1, intr2, dist1, dist2, extr = read_calibration(
-            args.path_config
+        generator, intr_l, intr_r, (H, W), extr = rgb_stereo_generator(
+            path_bag=args.path_bag,
+            path_config=args.path_config,
+            cam1=args.cam1,
+            cam2=args.cam2,
+            start=args.start,
+            stop=args.stop,
+            scale=args.scale,
+            clahe=args.clahe,
+            rectify=not args.no_rect,
         )
-        assert res1.tolist() == res2.tolist()
 
         slam = DPVO(
             cfg,
             args.network,
-            ht=int(res1[1] * args.scale),
-            wd=int(res1[0] * args.scale),
+            ht=H,
+            wd=W,
             show=args.show,
             extrinsics=extr,
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
+        intr_l = torch.from_numpy(intr_l).cuda()
+        intr_r = torch.from_numpy(intr_r).cuda()
 
-        generator1 = rgb_generator(
-            path_bag=args.path_bag,
-            cam_topic=args.cam1,
-            W=res1[0],
-            H=res1[1],
-            intr=intr1,
-            dist=dist1,
-            start=args.start,
-            stop=args.stop,
-            clahe=args.clahe,
-            scale=args.scale,
-        )
-        generator2 = rgb_generator(
-            path_bag=args.path_bag,
-            cam_topic=args.cam2,
-            W=res2[0],
-            H=res2[1],
-            intr=intr2,
-            dist=dist2,
-            start=args.start,
-            stop=args.stop,
-            clahe=args.clahe,
-            scale=args.scale,
-        )
-
-        generator = islice(
-            sync_generators(generator1, generator2), None, None, args.stride
-        )
+        generator = islice(generator, None, None, args.stride)
         point_cloud = []
 
-        for i, ((t1, image1, intrinsics1), (t2, image2, intrinsics2)) in enumerate(
-            generator
-        ):
+        for i, ((t1, image1), (t2, image2)) in enumerate(generator):
             if t1 != t2:
                 raise Exception(
                     f"Error two cams are not sync {t1} != {t2}, try --shift for manual alignment"
@@ -181,13 +199,10 @@ def main():
                 cv2.waitKey(1)
 
             image1 = torch.from_numpy(image1).permute(2, 0, 1).cuda()
-            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
-
             image2 = torch.from_numpy(image2).permute(2, 0, 1).cuda()
-            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                pose = slam(t1, (image1, image2), (intrinsics1, intrinsics2))
+                pose = slam(t1, (image1, image2), (intr_l, intr_r))
 
             if pose is not None:
                 if args.point_cloud or args.visualize:
@@ -238,9 +253,7 @@ def main():
         save_ply(args.name, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(
-            args.name, traj_est, points, colors, *intrinsics1, res1[1], res1[0]
-        )
+        save_output_for_COLMAP(args.name, traj_est, points, colors, *intr_l, H, W)
 
     ate_score = None
     if args.gt is not None:

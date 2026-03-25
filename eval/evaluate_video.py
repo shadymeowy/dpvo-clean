@@ -22,35 +22,19 @@ from dpvo.plot_utils import (
     save_output_for_COLMAP,
     save_ply,
 )
+from dpvo.rectify import compute_stereo_map
 from dpvo.utils import Timer
 
 
 def rgb_generator(
-    path, intr, dist, start=None, stop=None, stride=1, clahe=False, scale=1.0
+    path, start=None, stop=None, stride=1, clahe=False, scale=1.0, H=None, W=None, rect_map=None
 ):
     video = cv2.VideoCapture(path)
     if not video.isOpened():
         raise IOError(f"Could not open video {path}")
 
     fps = video.get(cv2.CAP_PROP_FPS)
-    W = int(video.get(cv2.CAP_PROP_FRAME_WIDTH) * scale)
-    H = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT) * scale)
     frame_length = int(video.get(cv2.CAP_PROP_FRAME_COUNT))
-    intrinsics = np.array(intr) * scale
-    distortion_coeffs = np.array(dist)
-
-    K = np.array(
-        [
-            [intrinsics[0], 0, intrinsics[2]],
-            [0, intrinsics[1], intrinsics[3]],
-            [0, 0, 1],
-        ]
-    )
-    K_new, _ = cv2.getOptimalNewCameraMatrix(K, distortion_coeffs, (W, H), 0, (W, H))
-    intrinsics_new = np.array([K_new[0, 0], K_new[1, 1], K_new[0, 2], K_new[1, 2]])
-    mapx, mapy = cv2.initUndistortRectifyMap(
-        K, distortion_coeffs, None, K_new, (W, H), cv2.CV_32FC1
-    )
 
     if clahe:
         clahe = cv2.createCLAHE(clipLimit=10.0, tileGridSize=(8, 8))
@@ -69,7 +53,7 @@ def rgb_generator(
         ):
             if scale != 1.0:
                 image = cv2.resize(image, (W, H))
-            image = cv2.remap(image, mapx, mapy, cv2.INTER_LINEAR)
+            image = cv2.remap(image, rect_map[0], rect_map[1], cv2.INTER_LINEAR)
 
             if len(image.shape) == 2:
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
@@ -80,7 +64,7 @@ def rgb_generator(
                 image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
 
             t = frame_idx / fps
-            yield t, image, intrinsics_new
+            yield t, image
 
         frame_idx += 1
 
@@ -93,6 +77,66 @@ def check_video_resolution(path, scale):
     W = int(video.get(cv2.CAP_PROP_FRAME_WIDTH) * scale)
     H = int(video.get(cv2.CAP_PROP_FRAME_HEIGHT) * scale)
     return H, W
+
+
+def rgb_stereo_generator(
+    path_left,
+    path_right,
+    intr_l,
+    intr_r,
+    dist_l,
+    dist_r,
+    extr,
+    scale=1.0,
+    rectify=False,
+    **kwargs,
+):
+    H_l, W_l = check_video_resolution(path_left, scale)
+    H_r, W_r = check_video_resolution(path_right, scale)
+    if (H_l, W_l) != (H_r, W_r):
+        raise ValueError(
+            f"Video resolutions do not match: {(H_l, W_l)} != {(H_r, W_r)}"
+        )
+
+    T_l = np.eye(4)
+    T_l2r = np.eye(4)
+    T_l2r[:3, :3] = R.from_rotvec(extr[3:6]).as_matrix()
+    T_l2r[:3, 3] = extr[:3]
+    T_r = np.linalg.inv(T_l2r)
+
+    map_l, map_r, intr_l, intr_r, extr = compute_stereo_map(
+        np.array(intr_l) * scale,
+        np.array(intr_r) * scale,
+        np.array(dist_l),
+        np.array(dist_r),
+        T_l,
+        T_r,
+        H_l,
+        W_l,
+        rectify,
+        fisheye=False,
+    )
+
+    gen_l = pgenerator(
+        rgb_generator,
+        path=path_left,
+        scale=scale,
+        H=H_l,
+        W=W_l,
+        rect_map=map_l,
+        **kwargs,
+    )
+    gen_r = pgenerator(
+        rgb_generator,
+        path=path_right,
+        scale=scale,
+        H=H_l,
+        W=W_l,
+        rect_map=map_r,
+        **kwargs,
+    )
+
+    return zip(gen_l, gen_r, strict=False), intr_l, intr_r, (H_l, W_l), extr
 
 
 def main():
@@ -122,6 +166,7 @@ def main():
     parser.add_argument("--timeit-file", type=str, default=None)
     parser.add_argument("--point_cloud", action="store_true")
     parser.add_argument("--visualize", action="store_true")
+    parser.add_argument("--no_rect", action="store_true")
     parser.add_argument(
         "--intrinsics_2",
         type=float,
@@ -206,11 +251,21 @@ def main():
             viz = ProcessViz()
 
     with torch.no_grad():
-        H, W = check_video_resolution(args.video_1, args.scale)
-
-        r = R.from_rotvec(args.extrinsics[3:6])
-        q = r.as_quat()
-        extrinsics = np.hstack((args.extrinsics[0:3], q))
+        gen, intr_l, intr_r, (H, W), extrinsics = rgb_stereo_generator(
+            path_left=args.video_1,
+            path_right=args.video_2,
+            intr_l=args.intrinsics_1,
+            intr_r=args.intrinsics_2,
+            dist_l=args.distortion_1,
+            dist_r=args.distortion_2,
+            extr=args.extrinsics,
+            start=args.start,
+            stop=args.stop,
+            stride=args.stride,
+            scale=args.scale,
+            clahe=args.clahe,
+            rectify=not args.no_rect,
+        )
         print("Extrinsics (x y z qx qy qz qw): ", extrinsics)
 
         slam = DPVO(
@@ -223,45 +278,20 @@ def main():
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
-        generator1 = pgenerator(
-            rgb_generator,
-            path=args.video_1,
-            intr=args.intrinsics_1,
-            dist=args.distortion_1,
-            start=args.start,
-            stop=args.stop,
-            stride=args.stride,
-            scale=args.scale,
-            clahe=args.clahe,
-        )
-        generator2 = pgenerator(
-            rgb_generator,
-            path=args.video_2,
-            intr=args.intrinsics_2,
-            dist=args.distortion_2,
-            start=args.start,
-            stop=args.stop,
-            stride=args.stride,
-            scale=args.scale,
-            clahe=args.clahe,
-        )
+        intr_l = torch.from_numpy(intr_l).cuda()
+        intr_r = torch.from_numpy(intr_r).cuda()
         point_cloud = []
-        for i, ((t1, image1, intrinsics1), (t2, image2, intrinsics2)) in enumerate(
-            zip(generator1, generator2, strict=False)
-        ):
+        for i, ((t1, image1), (t2, image2)) in enumerate(gen):
             if args.show:
                 concat = cv2.hconcat([image1, image2])
                 cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
             image1 = torch.from_numpy(image1).permute(2, 0, 1).cuda()
-            intrinsics1 = torch.from_numpy(intrinsics1).cuda()
-
             image2 = torch.from_numpy(image2).permute(2, 0, 1).cuda()
-            intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                pose = slam(t1, (image1, image2), (intrinsics1, intrinsics2))
+                pose = slam(t1, (image1, image2), (intr_l, intr_r))
 
             if pose is not None:
                 if args.point_cloud or args.visualize:
@@ -312,7 +342,7 @@ def main():
         save_ply(scene, points, colors)
 
     if args.save_colmap:
-        save_output_for_COLMAP(scene, traj_est, points, colors, *intrinsics1, H, W)
+        save_output_for_COLMAP(scene, traj_est, points, colors, *intr_l, H, W)
 
     ate_score = None
     if args.gt is not None:

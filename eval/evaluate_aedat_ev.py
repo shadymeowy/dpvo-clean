@@ -18,7 +18,6 @@ from tqdm import tqdm
 from dpvo.config import cfg
 from dpvo.devo import DEVO
 from dpvo.event import (
-    compute_inv_map,
     get_time_indices_offsets,
     to_voxel_grid,
     voxel_to_img,
@@ -29,20 +28,20 @@ from dpvo.plot_utils import (
     save_output_for_COLMAP,
     save_ply,
 )
+from dpvo.rectify import compute_inv_map
 from dpvo.utils import Timer
 
 
 def ev_generator(
     path,
-    resolution,
-    intrinsics,
-    distortion,
     period,
+    H,
+    W,
+    rect_map,
     t_limits=(None, None),
     scale=1.0,
     bins=5,
     stride=1,
-    fisheye=False,
 ):
     decoder = aedat.Decoder(path)
     xs, ys, ts, ps = [], [], [], []
@@ -69,15 +68,6 @@ def ev_generator(
     ps = np.concatenate(ps)
 
     print(f"Total number of events: {len(ts)}")
-    H = resolution[0]
-    W = resolution[1]
-
-    intrinsics = np.array(intrinsics)
-    distortion = np.array(distortion)
-
-    intrinsics_new, rect_map = compute_inv_map(
-        intrinsics, distortion, W, H, fisheye=fisheye
-    )
 
     voxel = np.zeros((bins + 1, H, W), dtype=np.float32)
     duration = (ts[-1] - ts[0]) / 1e6
@@ -100,8 +90,9 @@ def ev_generator(
         tb = ts[idx0:idx1]
         tp = ps[idx0:idx1]
 
-        tx = (tx * scale).astype(np.int32)
-        ty = (ty * scale).astype(np.int32)
+        if scale != 1.0:
+            tx = (tx * scale).astype(np.int32)
+            ty = (ty * scale).astype(np.int32)
 
         rect = rect_map[ty, tx]
         x_rect = np.ascontiguousarray(rect[..., 0])
@@ -109,7 +100,33 @@ def ev_generator(
 
         to_voxel_grid(voxel.ravel(), x_rect, y_rect, tb, tp, H, W, bins)
 
-        yield (tb[0] / 1e6, voxel[:-1], intrinsics_new)
+        yield (tb[0] / 1e6, voxel[:-1])
+
+
+def ev_generator_from_aedat(
+    path,
+    resolution,
+    intrinsics,
+    distortion,
+    scale=1.0,
+    fisheye=False,
+    **kwargs,
+):
+    H = int(resolution[0] * scale)
+    W = int(resolution[1] * scale)
+    intrinsics = np.array(intrinsics) * scale
+    intrinsics, rect_map = compute_inv_map(intrinsics, distortion, W, H, fisheye=fisheye)
+
+    gen = pgenerator(
+        ev_generator,
+        path=path,
+        H=H,
+        W=W,
+        rect_map=rect_map,
+        **kwargs,
+    )
+
+    return gen, intrinsics, (H, W)
 
 
 def main():
@@ -192,9 +209,19 @@ def main():
             viz = ProcessViz()
 
     with torch.no_grad():
-        H = args.resolution[0]
-        W = args.resolution[1]
         bins = 5
+        gen, intrinsics, (H, W) = ev_generator_from_aedat(
+            path=args.aedat4,
+            intrinsics=args.intrinsics,
+            distortion=args.distortion,
+            period=args.period,
+            t_limits=(args.start, args.stop),
+            scale=args.scale,
+            bins=bins,
+            stride=args.stride,
+            resolution=args.resolution,
+            fisheye=args.fisheye,
+        )
 
         slam = DEVO(
             cfg,
@@ -205,30 +232,16 @@ def main():
             enable_timing=args.timeit,
             timing_file=args.timeit_file,
         )
+        intrinsics = torch.from_numpy(intrinsics).cuda()
         point_cloud = []
 
-        for i, (t, voxel, intrinsics) in enumerate(
-            pgenerator(
-                ev_generator,
-                path=args.aedat4,
-                intrinsics=args.intrinsics,
-                distortion=args.distortion,
-                period=args.period,
-                t_limits=(args.start, args.stop),
-                scale=args.scale,
-                bins=bins,
-                stride=args.stride,
-                resolution=(H, W),
-                fisheye=args.fisheye,
-            )
-        ):
+        for i, (t, voxel) in enumerate(gen):
             if args.show:
                 img = voxel_to_img(voxel)
                 cv2.imshow("voxel", img)
                 cv2.waitKey(1)
 
             voxel = torch.from_numpy(voxel).cuda()
-            intrinsics = torch.from_numpy(intrinsics).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
                 pose = slam(t, voxel, intrinsics)
