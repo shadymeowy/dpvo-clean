@@ -20,7 +20,6 @@ from dpvo.plot_utils import (
     plot_trajectory,
     save_output_for_COLMAP,
     save_ply,
-    save_point_cloud,
 )
 from dpvo.utils import Timer
 
@@ -92,10 +91,11 @@ def main():
     parser.add_argument("--save_ply", action="store_true")
     parser.add_argument("--save_colmap", action="store_true")
     parser.add_argument("--save_trajectory", action="store_true")
-    parser.add_argument("--save_point_cloud", action="store_true")
     parser.add_argument("--save_matches", action="store_true")
     parser.add_argument("--stride", type=int, default=2)
     parser.add_argument("--timeit-file", type=str, default=None)
+    parser.add_argument("--point_cloud", action="store_true")
+    parser.add_argument("--visualize", action="store_true")
 
     args = parser.parse_args()
 
@@ -107,6 +107,19 @@ def main():
     if args.profile:
         profile = cProfile.Profile()
         profile.enable()
+
+    if args.gt is not None:
+        traj_ref = file_interface.read_tum_trajectory_file(args.gt)
+
+    if args.visualize:
+        from dpvo.viz import ProcessViz
+
+        if args.gt is not None:
+            t_gt = traj_ref.timestamps
+            pos_gt = traj_ref.positions_xyz
+            viz = ProcessViz(t_gt, pos_gt)
+        else:
+            viz = ProcessViz()
 
     with torch.no_grad():
         res1, res2, intr1, intr2, dist1, dist2, extr = read_calibration(
@@ -153,6 +166,7 @@ def main():
         generator = islice(
             sync_generators(generator1, generator2), None, None, args.stride
         )
+        point_cloud = []
 
         for i, ((t1, image1, intrinsics1), (t2, image2, intrinsics2)) in enumerate(
             generator
@@ -173,7 +187,17 @@ def main():
             intrinsics2 = torch.from_numpy(intrinsics2).cuda()
 
             with Timer("total", enabled=args.timeit, file=args.timeit_file):
-                slam(t1, (image1, image2), (intrinsics1, intrinsics2))
+                pose = slam(t1, (image1, image2), (intrinsics1, intrinsics2))
+
+            if pose is not None:
+                if args.point_cloud or args.visualize:
+                    pc = slam.point_cloud().cpu().numpy()
+
+                if args.point_cloud:
+                    point_cloud.append(pc)
+
+                if args.visualize:
+                    viz.add(t1, pose[:3], pose[3:], pc)
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/{args.name}", exist_ok=True)
@@ -184,9 +208,11 @@ def main():
 
         points = slam.pg.points_.cpu().numpy()[: slam.m]
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
-        points_idx = slam.pg.tstamps_[slam.pg.ix[: slam.m].cpu().numpy()]
 
         poses, tstamps = slam.terminate()
+
+        if args.visualize:
+            viz.close()
 
     if args.profile:
         profile.disable()
@@ -216,19 +242,8 @@ def main():
             args.name, traj_est, points, colors, *intrinsics1, res1[1], res1[0]
         )
 
-    if args.save_point_cloud:
-        os.makedirs("saved_point_clouds", exist_ok=True)
-        save_point_cloud(
-            f"saved_point_clouds/{args.name}.viz.txt",
-            traj_est,
-            points,
-            points_idx,
-            colors,
-        )
-
     ate_score = None
     if args.gt is not None:
-        traj_ref = file_interface.read_tum_trajectory_file(args.gt)
         traj_ref, traj_est = sync.associate_trajectories(traj_ref, traj_est)
 
         try:
@@ -261,6 +276,12 @@ def main():
             align=True,
             correct_scale=False,
         )
+
+    if args.point_cloud and len(point_cloud) > 0:
+        point_cloud = np.stack(point_cloud, axis=0)
+        os.makedirs("point_clouds", exist_ok=True)
+        np.save(f"point_clouds/{args.name}.npy", point_cloud)
+        print(f"Saved point cloud with {point_cloud.shape}")
 
 
 if __name__ == "__main__":

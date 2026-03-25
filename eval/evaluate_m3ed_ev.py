@@ -25,7 +25,6 @@ from dpvo.plot_utils import (
     plot_trajectory,
     save_output_for_COLMAP,
     save_ply,
-    save_point_cloud,
 )
 from dpvo.rectify import compute_stereo_inv_map
 from dpvo.utils import Timer
@@ -170,10 +169,11 @@ def main():
     parser.add_argument("--stop", type=float, default=None)
     parser.add_argument("--stride", type=int, default=1)
     parser.add_argument("--clahe", action="store_true")  # wont work
-    parser.add_argument("--save_point_cloud", action="store_true")
     parser.add_argument("--save_matches", action="store_true")
     parser.add_argument("--fisheye", action="store_true")
     parser.add_argument("--no_rect", action="store_true")
+    parser.add_argument("--point_cloud", action="store_true")
+    parser.add_argument("--visualize", action="store_true")
 
     args = parser.parse_args()
 
@@ -189,6 +189,19 @@ def main():
     if args.profile:
         profile = cProfile.Profile()
         profile.enable()
+
+    if args.gt is not None:
+        traj_ref = file_interface.read_tum_trajectory_file(args.gt)
+
+    if args.visualize:
+        from dpvo.viz import ProcessViz
+
+        if args.gt is not None:
+            t_gt = traj_ref.timestamps
+            pos_gt = traj_ref.positions_xyz
+            viz = ProcessViz(t_gt, pos_gt)
+        else:
+            viz = ProcessViz()
 
     with torch.no_grad():
         gen, intr_l, intr_r, (H, W), extr = ev_stereo_generator(
@@ -218,6 +231,8 @@ def main():
         intr_l = torch.from_numpy(intr_l).cuda()
         intr_r = torch.from_numpy(intr_r).cuda()
 
+        point_cloud = []
+
         for i, ((t1, voxel1), (t2, voxel2)) in enumerate(gen):
             if args.show:
                 img1 = voxel_to_img(voxel1.cpu().numpy())
@@ -226,8 +241,18 @@ def main():
                 cv2.imshow("concat", concat)
                 cv2.waitKey(1)
 
-            with Timer("SLAM", enabled=args.timeit, file=args.timeit_file):
-                slam(t1, (voxel1, voxel2), (intr_l, intr_r))
+            with Timer("total", enabled=args.timeit, file=args.timeit_file):
+                pose = slam(t1, (voxel1, voxel2), (intr_l, intr_r))
+
+            if pose is not None:
+                if args.point_cloud or args.visualize:
+                    pc = slam.point_cloud().cpu().numpy()
+
+                if args.point_cloud:
+                    point_cloud.append(pc)
+
+                if args.visualize:
+                    viz.add(t1, pose[:3], pose[3:], pc)
 
             if args.save_matches and slam.concatenated_image is not None:
                 os.makedirs(f"saved_matches/M3ED_{scene}{args.name}", exist_ok=True)
@@ -238,9 +263,11 @@ def main():
 
         points = slam.pg.points_.cpu().numpy()[: slam.m]
         colors = slam.pg.colors_.view(-1, 3).cpu().numpy()[: slam.m]
-        points_idx = slam.pg.tstamps_[slam.pg.ix[: slam.m].cpu().numpy()]
 
         poses, tstamps = slam.terminate()
+
+        if args.visualize:
+            viz.close()
 
     if args.profile:
         profile.disable()
@@ -267,16 +294,6 @@ def main():
 
     if args.save_colmap:
         save_output_for_COLMAP(scene, traj_est, points, colors, *intr_l, H, W)
-
-    if args.save_point_cloud:
-        os.makedirs("saved_point_clouds", exist_ok=True)
-        save_point_cloud(
-            f"saved_point_clouds/M3ED_{scene}{args.name}.viz.txt",
-            traj_est,
-            points,
-            points_idx,
-            colors,
-        )
 
     ate_score = None
     if args.gt is not None:
@@ -315,6 +332,12 @@ def main():
             align=True,
             correct_scale=False,
         )
+
+    if args.point_cloud and len(point_cloud) > 0:
+        point_cloud = np.stack(point_cloud, axis=0)
+        os.makedirs("point_clouds", exist_ok=True)
+        np.save(f"point_clouds/M3ED_{scene}{args.name}.npy", point_cloud)
+        print(f"Saved point cloud with {point_cloud.shape}")
 
 
 if __name__ == "__main__":
